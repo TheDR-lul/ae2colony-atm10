@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.4.2-atm10"
+local scriptVersion = "0.4.3-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -54,6 +54,17 @@ local logFolder = "ae2Colony_logs"
 local maxLogs = 10
 local maxLogSize = 200*1024 -- 100 KB
 local alarm = nil -- Used to update monitor for errors.
+
+-- When AE2 has no autocraft recipe, optionally notify an out-of-game hook (HTTP) and/or append JSONL locally.
+-- Full "create encoded pattern + insert into ExtendedAE Assembly Matrix" is NOT possible from Lua alone; see docs/AUTO_PATTERN_ATM10.md
+local missingPatternHook = {
+ enabled = false,
+ httpUrl = nil, -- e.g. "http://127.0.0.1:8099/ae2colony/missing" (run pattern-hook/server.py on the MC host)
+ httpSecret = nil, -- sent as header X-AE2Colony-Secret when set
+ cooldownSeconds = 120, -- per item_id, reduces spam for repeating colony requests
+ logFile = "ae2colony_missing_patterns.jsonl", -- always written when enabled (in addition to HTTP when httpUrl set)
+}
+local missingHookLastPostMs = {}
 
 -- [BLACKLIST & WHITELIST LOOKUPS] --------------------------------------------------------------------------------------------------------
 -- blacklistedTags: all items matching the given tags are skipped, they do not export.
@@ -232,6 +243,51 @@ end
 local function logAndDisplay(msg)
  logLine(msg)
  table.insert(monitorLines, msg)
+end
+
+local function notifyMissingPatternHook(ctx)
+ if not missingPatternHook.enabled then
+  return
+ end
+ local name = ctx and ctx.name
+ if not name or name == "" then
+  return
+ end
+ local now = os.epoch("utc")
+ local cdMs = (missingPatternHook.cooldownSeconds or 120) * 1000
+ local last = missingHookLastPostMs[name]
+ if last and (now - last) < cdMs then
+  return
+ end
+ missingHookLastPostMs[name] = now
+
+ local payload = {
+  item_id = name,
+  count = ctx.count or 1,
+  fingerprint = ctx.fingerprint or "",
+  target = ctx.target or "",
+  ts = now,
+ }
+ local body = textutils.serializeJSON(payload)
+ if missingPatternHook.logFile and #missingPatternHook.logFile > 0 then
+  local f = fs.open(missingPatternHook.logFile, "a")
+  if f then
+   f.writeLine(body)
+   f.close()
+  end
+ end
+ local url = missingPatternHook.httpUrl
+ if url and http and http.post then
+  local headers = { ["Content-Type"] = "application/json" }
+  local secret = missingPatternHook.httpSecret
+  if secret and #secret > 0 then
+   headers["X-AE2Colony-Secret"] = secret
+  end
+  local ok, err = pcall(http.post, url, body, headers)
+  if not ok and doLog then
+   logLine("[missingPatternHook] http.post failed: " .. tostring(err))
+  end
+ end
 end
 
 -- [AP PERIPHERAL SETUP] ----------------------------------------------------------------------------------------------
@@ -484,7 +540,13 @@ local function craftHandler(request, bridgeItem, bridge)
  logAndDisplay(string.format("[ERROR] Failed crafting: x%d - %s [%s]", stackSize, name, fingerprintBridge or fingerprintRequest or "Not Available"))
  end
  else
- logAndDisplay(string.format("[MISSING] No recipe x%d - %s [%s]", stackSize, name, fingerprintBridge or fingerprintRequest or "Not Available"))
+  logAndDisplay(string.format("[MISSING] No recipe x%d - %s [%s]", stackSize, name, fingerprintBridge or fingerprintRequest or "Not Available"))
+  notifyMissingPatternHook({
+   name = name,
+   count = stackSize,
+   fingerprint = fingerprintRequest,
+   target = (request and (request.target or request.name)) or "",
+  })
  end
  return object
 end
