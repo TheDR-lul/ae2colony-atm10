@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.6.3-atm10"
+local scriptVersion = "0.6.4-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -1215,6 +1215,7 @@ local function fetchScadaSnapshot(colony, bridge, nowMs)
  if sat < thr then
  out.lowSatCount = out.lowSatCount + 1
  low[#low + 1] = { name = tostring(c.name or "?"), sat = sat }
+ end
  end
  end
  end
