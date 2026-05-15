@@ -21,6 +21,8 @@ return {
   constructionPushDrainMaxPerTick = 4,
   showMeCraftingStatus = true,
   showMeCraftingSpinner = true,
+  -- Third monitor line (height >= 8): last craft orders, export bar, CPU hint.
+  showMeCraftingHudLine = true,
   showBuildingsList = false,
   buildingsBreakerMinutes = 30,
   maxLinesPerGroup = 12,

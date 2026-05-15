@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.5.9-atm10"
+local scriptVersion = "0.5.11-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -110,6 +110,8 @@ local constructionPushDrainMaxPerTick = 4
 -- Header line 2: show ME crafting CPU busy count (and spinner when crafting or drain pending).
 local showMeCraftingStatus = true
 local showMeCraftingSpinner = true
+-- Extra header line (line 3): progress bar + last craft orders (needs monitor height >= 8).
+local showMeCraftingHudLine = true
 local monitorGroupOrder = {
  "COLONY",
  "NEEDS",
@@ -124,6 +126,8 @@ local monitorGroupOrder = {
 
 local pendingPostCraftExport = {}
 local lastPostCraftDrainMs = 0
+-- Last N craft orders started (for HUD "what went to craft").
+local recentCraftOrders = {}
 
 local function mergeUserConfig()
  if not fs.exists("ae2colony_config.lua") then
@@ -229,6 +233,9 @@ local function mergeUserConfig()
  end
  if tbl.showMeCraftingSpinner ~= nil then
  showMeCraftingSpinner = tbl.showMeCraftingSpinner
+ end
+ if tbl.showMeCraftingHudLine ~= nil then
+ showMeCraftingHudLine = tbl.showMeCraftingHudLine
  end
  if type(tbl.missingPatternHook) == "table" then
  for mk, mv in pairs(tbl.missingPatternHook) do
@@ -969,6 +976,8 @@ local function updateMonitorGrouped(monitor)
 
  local width, height = monitor.getSize()
  local reserved = (showConstructionPushFooter and height >= 5) and 1 or 0
+ local craftHudRows = (showMeCraftingHudLine and height >= 8) and 1 or 0
+ reserved = reserved + craftHudRows
  local maxLines = height - 2 - reserved
  local flatLines = {}
 
@@ -1043,12 +1052,13 @@ local function updateMonitorGrouped(monitor)
  local startLine = (currentPage - 1) * maxLines + 1
  local endLine = math.min(startLine + maxLines - 1, #flatLines)
 
- for y = 3, height do
+ local bodyStartY = 3 + craftHudRows
+ for y = bodyStartY, height do
  monitor.setCursorPos(1, y)
  monitor.write(string.rep(" ", width))
  end
 
- local y = 3
+ local y = bodyStartY
  for i = startLine, endLine do
  monitor.setCursorPos(1, y)
  monitor.setTextColor(flatLines[i].color)
@@ -1287,7 +1297,119 @@ local function countBusyCraftingCpus(bridge)
 end
 
 local meCraftSpinChars = { "|", "/", "-", "\\" }
-local function meCraftingActivitySuffix(bridge, tick)
+local function pushRecentCraftOrder(label, idLog, count)
+ if not showMeCraftingHudLine then
+ return
+ end
+ local c = math.floor(tonumber(count) or 0)
+ if c < 1 then
+ c = 1
+ end
+ local short = label or prettifyItemId(idLog or "?")
+ if #short > 22 then
+ short = short:sub(1, 20) .. ".."
+ end
+ table.insert(recentCraftOrders, 1, {
+ text = string.format("%s x%d", short, c),
+ id = idLog,
+ })
+ while #recentCraftOrders > 5 do
+ table.remove(recentCraftOrders)
+ end
+end
+
+local function drainExportProgressFraction()
+ if #pendingPostCraftExport == 0 then
+ return nil
+ end
+ local num = 0
+ local den = 0
+ for _, q in ipairs(pendingPostCraftExport) do
+ local tot = math.max(1, tonumber(q.totalNeed) or tonumber(q.stillNeed) or 1)
+ local left = math.max(0, tonumber(q.stillNeed) or 0)
+ local done = tot - left
+ if done < 0 then
+ done = 0
+ end
+ num = num + done
+ den = den + tot
+ end
+ if den < 1 then
+ return nil
+ end
+ return num / den
+end
+
+local function asciiProgressBar(frac, innerChars, tickForAnim)
+ local iw = math.max(4, tonumber(innerChars) or 12)
+ iw = math.min(iw, 32)
+ local f = math.max(0, math.min(1, tonumber(frac) or 0))
+ local fill = math.floor(f * iw + 0.5)
+ if fill > iw then
+ fill = iw
+ end
+ local t = math.max(0, tonumber(tickForAnim) or 0)
+ local scanPos = (t % iw) + 1
+ local segs = { "[" }
+ for i = 1, iw do
+ if i <= fill then
+ table.insert(segs, "=")
+ elseif tickForAnim ~= nil and fill < iw and i == scanPos then
+ table.insert(segs, ">")
+ else
+ table.insert(segs, ".")
+ end
+ end
+ table.insert(segs, "]")
+ return table.concat(segs)
+end
+
+local function formatCraftJobsHud(tick)
+ if #recentCraftOrders < 1 then
+ return ""
+ end
+ local period = 16
+ local t = math.max(0, tonumber(tick) or 0)
+ if #recentCraftOrders == 1 then
+ return "craft>" .. recentCraftOrders[1].text
+ end
+ local idx = (math.floor(t / period) % #recentCraftOrders) + 1
+ return string.format("craft>%s %d/%d", recentCraftOrders[idx].text, idx, #recentCraftOrders)
+end
+
+local function buildCraftHudText(bridge, tick, maxLen)
+ local busy = countBusyCraftingCpus(bridge)
+ local pend = #pendingPostCraftExport
+ local frac = drainExportProgressFraction()
+ local spin = ""
+ if showMeCraftingSpinner then
+ spin = meCraftSpinChars[(math.max(0, tick) % 4) + 1] .. " "
+ end
+ local parts = {}
+ local jobHud = formatCraftJobsHud(tick)
+ if #jobHud > 0 then
+ table.insert(parts, jobHud)
+ end
+ if busy > 0 then
+ table.insert(parts, string.format("%sMEcpu:%d", spin, busy))
+ end
+ if frac then
+ local barInner = math.min(14, math.max(6, math.floor((maxLen or 40) * 0.22)))
+ table.insert(parts, asciiProgressBar(frac, barInner, tick) .. string.format("%d%%", math.floor(frac * 100 + 0.5)))
+ elseif pend > 0 then
+ table.insert(parts, "out q:" .. pend)
+ end
+ local s = table.concat(parts, " ")
+ if #s > maxLen then
+ s = s:sub(1, maxLen)
+ end
+ return s
+end
+
+local function meCraftingActivitySuffix(bridge, tick, useFullHudLine)
+ if useFullHudLine then
+ return ""
+ end
  if not showMeCraftingStatus or not bridge then
  return ""
  end
@@ -1307,7 +1429,8 @@ end
 local function updateHeader(monitor, bridge, tick, snapshot)
  if not monitor then return end
 
- local width, _ = monitor.getSize()
+ local width, height = monitor.getSize()
+ local useCraftHud = showMeCraftingHudLine and height >= 8
  local headerText = string.format("%s v%s", scriptName, scriptVersion)
  local status = confirmConnection(bridge)
  local statusText = status and "AE2 ONLINE" or "AE2 OFFLINE"
@@ -1331,7 +1454,7 @@ local function updateHeader(monitor, bridge, tick, snapshot)
  if snapshot and type(snapshot.headerCompact) == "string" then
  left = snapshot.headerCompact
  end
- local suffix = meCraftingActivitySuffix(bridge, tick)
+ local suffix = meCraftingActivitySuffix(bridge, tick, useCraftHud)
  if #suffix > math.floor(width * 0.35) then
  suffix = ""
  end
@@ -1360,6 +1483,19 @@ local function updateHeader(monitor, bridge, tick, snapshot)
  if #suffix > 0 then
  monitor.setTextColor(colors.yellow)
  monitor.write(suffix)
+ end
+ if useCraftHud then
+ local hud = buildCraftHudText(bridge, tick, width)
+ monitor.setCursorPos(1, 3)
+ monitor.setTextColor(colors.black)
+ monitor.write(string.rep(" ", width))
+ monitor.setCursorPos(1, 3)
+ monitor.setTextColor(colors.orange)
+ monitor.write(hud)
+ if #hud < width then
+ monitor.setTextColor(colors.black)
+ monitor.write(string.rep(" ", width - #hud))
+ end
  end
 end
 
@@ -1541,6 +1677,7 @@ local function craftHandler(request, bridgeItem, bridge, craftAmount, itemLabel,
  if type(a) == "boolean" then
  if a then
  logAndDisplay(formatItemAction("[CRAFT]", stackSize, label, idLog, ""))
+ pushRecentCraftOrder(label, idLog, stackSize)
  return true
  end
  logAndDisplay(
@@ -1549,6 +1686,7 @@ local function craftHandler(request, bridgeItem, bridge, craftAmount, itemLabel,
  return false
  end
  logAndDisplay(formatItemAction("[CRAFT]", stackSize, label, idLog, ""))
+ pushRecentCraftOrder(label, idLog, stackSize)
  return true
  else
  logAndDisplay(formatItemAction("[MISSING] No recipe", stackSize, label, idLog, ""))
@@ -1597,6 +1735,7 @@ local function enqueuePostCraftDrain(entry, stillNeed)
  if stillNeed > q.stillNeed then
  q.stillNeed = stillNeed
  end
+ q.totalNeed = math.max(tonumber(q.totalNeed) or 0, q.stillNeed)
  if deadline > q.deadlineMs then
  q.deadlineMs = deadline
  end
@@ -1609,6 +1748,7 @@ local function enqueuePostCraftDrain(entry, stillNeed)
  fingerprint = entry.fingerprint,
  components = entry.components or {},
  stillNeed = stillNeed,
+ totalNeed = stillNeed,
  deadlineMs = deadline,
  label = entry.displayName or prettifyItemId(entry.name or "?"),
  idLog = entry.name or "?",
