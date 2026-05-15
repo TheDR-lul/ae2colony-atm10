@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.6.1-atm10"
+local scriptVersion = "0.6.2-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -3001,8 +3001,7 @@ local function main()
  end
 end
 
-parallel.waitForAll(function()
- main()
-end, function()
- handleMonitorTouch(monitor, bridge, colony)
-end)
+parallel.waitForAll(
+ main,
+ function() handleMonitorTouch(monitor, bridge, colony) end
+)
