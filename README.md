@@ -24,6 +24,11 @@ ae2Colony
 
 (Optional) Save as `startup.lua` with `shell.run("ae2Colony")` for autostart.
 
+### v0.5.15 highlights
+
+- **Where sounds are:** CC **speaker** + `alerts.enabled=true` in config (not the monitor itself).
+- **Mute:** bottom-right **`[sound]`** / **`[MUTED!]`** on the last line — tap to toggle; state saved to `ae2colony_alerts_muted.txt`.
+
 ### v0.5.12 highlights
 
 - **Pinned `[ALERT]` rows** at the top of the monitor when ME is offline, the colony is under attack, or the `getBuildings` API breaker is active.

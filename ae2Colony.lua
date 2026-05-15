@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.5.14-atm10"
+local scriptVersion = "0.5.15-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -154,8 +154,11 @@ local recentCraftOrders = {}
 -- Pinned monitor rows (rebuilt before each body draw).
 local pinnedDisplayLines = {}
 -- NEEDS diff: previous snapshot map key -> { needed, status, label }
-local lastNeedsForDiff = nil
-local triggerAlert
+-- Bottom-right mute chip (monitor touch). Only drawn when alerts.enabled.
+local showAlertsMuteButton = true
+local alertsMuted = false
+local alertsMutedFile = "ae2colony_alerts_muted.txt"
+local ALERT_MUTE_CORNER_CHARS = 10
 
 local function mergeUserConfig()
  if not fs.exists("ae2colony_config.lua") then
@@ -279,6 +282,9 @@ local function mergeUserConfig()
  alerts[ak] = av
  end
  end
+ if tbl.showAlertsMuteButton ~= nil then
+ showAlertsMuteButton = tbl.showAlertsMuteButton
+ end
  if type(tbl.missingPatternHook) == "table" then
  for mk, mv in pairs(tbl.missingPatternHook) do
  missingPatternHook[mk] = mv
@@ -291,6 +297,30 @@ local function mergeUserConfig()
  whitelistItemName = tbl.whitelistItemName
  end
  print("[ae2Colony] Merged ae2colony_config.lua")
+end
+
+local function loadAlertsMuted()
+ alertsMuted = false
+ if not fs.exists(alertsMutedFile) then
+ return
+ end
+ local f = fs.open(alertsMutedFile, "r")
+ if not f then
+ return
+ end
+ local s = f.readAll()
+ f.close()
+ if type(s) == "string" and s:find("true", 1, true) then
+ alertsMuted = true
+ end
+end
+
+local function saveAlertsMuted()
+ local f = fs.open(alertsMutedFile, "w")
+ if f then
+ f.write(alertsMuted and "true" or "false")
+ f.close()
+ end
 end
 
 local function prettifyItemId(id)
@@ -988,6 +1018,7 @@ local whitelistItemName = {
 }
 
 mergeUserConfig()
+loadAlertsMuted()
 
 local alertKindToConfig = {
  raid = "onRaid",
@@ -1064,6 +1095,9 @@ local function pulseRedstoneAlert()
 end
 
 triggerAlert = function(kind)
+ if alertsMuted then
+ return
+ end
  if not alerts.enabled then
  return
  end
@@ -1198,7 +1232,11 @@ local function updateMonitorGrouped(monitor)
  if not monitor then return end
 
  local width, height = monitor.getSize()
- local reserved = (showConstructionPushFooter and height >= 5) and 1 or 0
+ local footerReserved = (height >= 5)
+ and (showConstructionPushFooter or (showAlertsMuteButton and alerts.enabled))
+ and 1
+ or 0
+ local reserved = footerReserved
  local craftHudRows = (showMeCraftingHudLine and height >= 8) and 1 or 0
  reserved = reserved + craftHudRows
  local maxLines = height - 2 - reserved
@@ -1403,20 +1441,55 @@ local function rebuildPinnedLines(bridge, snap)
 end
 
 local function drawConstructionFooter(monitor)
- if not monitor or not showConstructionPushFooter then
+ if not monitor then
  return
  end
  local w, h = monitor.getSize()
  if h < 5 then
  return
  end
+ if not showConstructionPushFooter and not (showAlertsMuteButton and alerts.enabled) then
+ return
+ end
+ local muteW = 0
+ local xMute = nil
+ if showAlertsMuteButton and alerts.enabled then
+ muteW = math.min(ALERT_MUTE_CORNER_CHARS, w)
+ if muteW >= 2 then
+ xMute = w - muteW + 1
+ end
+ end
+ local muteLabel = alertsMuted and "[MUTED!]" or "[sound]"
+ if muteW > 0 then
+ muteLabel = string.sub(muteLabel .. string.rep(" ", muteW), 1, muteW)
+ end
+ local craftMax = xMute and (xMute - 1) or w
  monitor.setCursorPos(1, h)
- monitor.setTextColor(colors.yellow)
+ if showConstructionPushFooter then
  local txt = ">>> CRAFT+EXPORT (NEEDS) <<<"
- if #txt > w then
+ if #txt > craftMax then
  txt = "> CRAFT+EXPORT <"
  end
- monitor.write(txt .. string.rep(" ", math.max(0, w - #txt)))
+ if #txt > craftMax then
+ txt = string.sub(txt, 1, craftMax)
+ end
+ monitor.setTextColor(colors.yellow)
+ monitor.write(txt)
+ if craftMax > #txt then
+ monitor.setTextColor(colors.black)
+ monitor.write(string.rep(" ", craftMax - #txt))
+ end
+ else
+ if craftMax > 0 then
+ monitor.setTextColor(colors.black)
+ monitor.write(string.rep(" ", craftMax))
+ end
+ end
+ if xMute then
+ monitor.setCursorPos(xMute, h)
+ monitor.setTextColor(alertsMuted and colors.magenta or colors.lightGray)
+ monitor.write(muteLabel)
+ end
 end
 
 local function refreshMonitorBody(monitor, bridgeForPin)
@@ -2151,10 +2224,21 @@ end
 
 local function handleMonitorTouch(monitor, bridge, colony)
  while true do
- local event, side, _, y = os.pullEvent("monitor_touch")
+ local event, side, x, y = os.pullEvent("monitor_touch")
  if side == peripheral.getName(monitor) then
- local _, h = monitor.getSize()
- if showConstructionPushFooter and h >= 5 and y == h then
+ local w, h = monitor.getSize()
+ local muteTap = false
+ if h >= 5 and y == h and showAlertsMuteButton and alerts.enabled then
+ local muteW = math.min(ALERT_MUTE_CORNER_CHARS, w)
+ local xMute = w - muteW + 1
+ if x >= xMute then
+ muteTap = true
+ end
+ end
+ if h >= 5 and y == h and muteTap then
+ alertsMuted = not alertsMuted
+ saveAlertsMuted()
+ elseif h >= 5 and y == h and showConstructionPushFooter then
  manualConstructionPush(bridge, colony, monitor)
  else
  currentPage = currentPage + 1
@@ -2300,6 +2384,15 @@ if exportChestPeripheral and #exportChestPeripheral > 0 then
  print(string.format("[ae2Colony] ME export -> peripheral '%s' (exportSide ignored).", exportChestPeripheral))
 else
  print(string.format("[ae2Colony] ME export -> bridge side '%s'. Chest not filling? Change exportSide (see docs/SIMPLE-RU.md).", exportSide))
+end
+if alerts.enabled then
+ if alertsMuted then
+ print("[ae2Colony] Alerts: ON (muted). Bottom-right: tap [sound] to hear alerts again.")
+ else
+ print("[ae2Colony] Alerts: ON — attach a CC speaker (wired). Bottom-right: tap to mute.")
+ end
+else
+ print("[ae2Colony] Alerts: OFF — set alerts.enabled=true in ae2colony_config.lua + speaker for sounds.")
 end
 
 local function main()

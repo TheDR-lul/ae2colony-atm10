@@ -45,6 +45,8 @@ return {
     onColonyRequestsCritical = true,
     onCraftStarted = false,
   },
+  -- Bottom-right mute chip when alerts.enabled (v0.5.15+).
+  showAlertsMuteButton = true,
   showBuildingsList = false,
   buildingsBreakerMinutes = 30,
   maxLinesPerGroup = 12,
