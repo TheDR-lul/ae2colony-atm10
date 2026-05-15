@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.6.2-atm10"
+local scriptVersion = "0.6.3-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -2907,7 +2907,7 @@ elseif scada.enabled then
  print("[ae2Colony] SCADA metrics on (set uiMode or ui.mode to scada + wide monitor for split view). docs/SCADA.md")
 end
 
-local function main()
+local function ae2MainLoop()
  local tick = scanInterval
  local nextUiMs = 0
  local prevUnderAttack = false
@@ -3001,7 +3001,8 @@ local function main()
  end
 end
 
-parallel.waitForAll(
- main,
- function() handleMonitorTouch(monitor, bridge, colony) end
-)
+local function ae2TouchLoop()
+ handleMonitorTouch(monitor, bridge, colony)
+end
+
+parallel.waitForAll(ae2MainLoop, ae2TouchLoop)
