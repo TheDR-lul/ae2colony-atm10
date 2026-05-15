@@ -23,6 +23,10 @@ ae2Colony
 
 (Optional) Save as `startup.lua` with `shell.run("ae2Colony")` for autostart.
 
+### v0.5.3 highlights
+
+- **NEEDS parsing:** tolerate sparse / non-array `getWorkOrderResources` / `getBuilderResources` tables and nested `item` objects (fixes empty NEEDS while “Top need” still showed).
+
 ### v0.5.2 highlights
 
 - **NEEDS** also merges **`getBuilderResources`** at the builder hut position (closer to the MineColonies “Required resources” UI than `getRequests()` alone).

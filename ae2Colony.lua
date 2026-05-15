@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.5.2-atm10"
+local scriptVersion = "0.5.3-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -303,6 +303,84 @@ end
 
 local colonyUiSnapshot = { headerCompact = "", lines = {}, needsLines = {}, needsEntries = {} }
 
+-- AP / CC may return resource lists as sparse arrays, mixed maps, or { resources = {...} }; #tbl is then wrong.
+local function collectResourceRows(res)
+ local rows = {}
+ if type(res) ~= "table" then
+  return rows
+ end
+ if type(res.resources) == "table" then
+  return collectResourceRows(res.resources)
+ end
+ local maxk = 0
+ for k, _ in pairs(res) do
+  if type(k) == "number" and k > maxk then
+   maxk = k
+  end
+ end
+ for i = 1, maxk do
+  local v = res[i]
+  if type(v) == "table" then
+   rows[#rows + 1] = v
+  end
+ end
+ if #rows == 0 then
+  for _, v in pairs(res) do
+   if type(v) == "table" and (v.item or v.name or v.displayName or v.id) then
+    rows[#rows + 1] = v
+   end
+  end
+ end
+ return rows
+end
+
+local function itemIdFromNeedRow(r)
+ if type(r) ~= "table" then
+  return nil
+ end
+ local it = r.item
+ if type(it) == "string" and #it > 0 then
+  return it
+ end
+ if type(it) == "table" then
+  if type(it.name) == "string" and #it.name > 0 then
+   return it.name
+  end
+  if type(it.id) == "string" and #it.id > 0 then
+   return it.id
+  end
+ end
+ if type(r.name) == "string" and #r.name > 0 then
+  return r.name
+ end
+ if type(r.id) == "string" and #r.id > 0 and r.id:find(":") then
+  return r.id
+ end
+ return nil
+end
+
+local function quantityFromNeedRow(r)
+ if type(r) ~= "table" then
+  return 1
+ end
+ local need = r.needed
+ local n = nil
+ if type(need) == "number" then
+  n = need
+ elseif type(need) == "string" then
+  n = tonumber(need)
+ elseif type(need) == "table" then
+  n = tonumber(need.count or need.amount or need.needed)
+ end
+ if not n then
+  n = tonumber(r.count) or tonumber(r.amount) or tonumber(r.missing)
+ end
+ if not n or n < 1 then
+  n = 1
+ end
+ return n
+end
+
 local function fetchColonyUiSnapshot(colony, nowMs)
  local lines = {}
  local needsLines = {}
@@ -381,13 +459,17 @@ local function fetchColonyUiSnapshot(colony, nowMs)
     local okR, res = pcall(function()
      return colony.getWorkOrderResources(list[1].id)
     end)
-    if okR and type(res) == "table" and #res > 0 then
-     local r = res[1]
-     local rn = r.displayName or r.item or "?"
-     table.insert(
-      lines,
-      string.format("[COLONY] Top need: %s x%s (%s)", tostring(rn), tostring(r.needed or "?"), tostring(r.status or "?"))
-     )
+    if okR and type(res) == "table" then
+     local rows = collectResourceRows(res)
+     if #rows > 0 then
+      local r = rows[1]
+      local rn = r.displayName or itemIdFromNeedRow(r) or "?"
+      local rq = quantityFromNeedRow(r)
+      table.insert(
+       lines,
+       string.format("[COLONY] Top need: %s x%s (%s)", tostring(rn), tostring(rq), tostring(r.status or "?"))
+      )
+     end
     end
    end
 
@@ -397,19 +479,16 @@ local function fetchColonyUiSnapshot(colony, nowMs)
      if type(r) ~= "table" then
       return
      end
-     local name = r.item or r.name
-     if (not name or #name == 0) and type(r.id) == "string" then
-      name = r.id
-     end
+     local name = itemIdFromNeedRow(r)
      if type(name) ~= "string" or #name == 0 then
       return
      end
      local fp = r.fingerprint
-     local key = (fp and tostring(fp)) or name
-     local n = tonumber(r.needed) or tonumber(r.count) or tonumber(r.amount) or tonumber(r.missing) or 0
-     if n < 1 then
-      n = 1
+     if type(fp) == "table" and type(fp.hash) == "string" then
+      fp = fp.hash
      end
+     local key = (fp and tostring(fp)) or name
+     local n = quantityFromNeedRow(r)
      local st = tostring(r.status or "?")
      local comps = r.components
      if type(comps) ~= "table" then
@@ -442,8 +521,9 @@ local function fetchColonyUiSnapshot(colony, nowMs)
        return colony.getWorkOrderResources(wrow.id)
       end)
       if okRes and type(res) == "table" then
-       for ri = 1, #res do
-        mergeNeedRow(wrow.id, res[ri])
+       local rows = collectResourceRows(res)
+       for _, row in ipairs(rows) do
+        mergeNeedRow(wrow.id, row)
        end
       end
      end
@@ -462,8 +542,9 @@ local function fetchColonyUiSnapshot(colony, nowMs)
         })
        end)
        if okBr and type(bred) == "table" then
-        for ri = 1, #bred do
-         mergeNeedRow(wrow.id, bred[ri])
+        local brows = collectResourceRows(bred)
+        for _, row in ipairs(brows) do
+         mergeNeedRow(wrow.id, row)
         end
        end
       end
