@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.5.16-atm10"
+local scriptVersion = "0.5.17-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -163,7 +163,10 @@ local alertsMutedFile = "ae2colony_alerts_muted.txt"
 -- If this file exists, it overrides alerts.enabled after config (true/false).
 local alertsMonitorOverrideFile = "ae2colony_alerts_monitor_enabled.txt"
 local FOOTER_ALERT_TEST_CHARS = 6
+local FOOTER_ALERT_SCAN_CHARS = 6
 local FOOTER_ALERT_MODE_CHARS = 8
+-- [SCAN] needs room for craft + mode + scan + test (see footerAlertBarLayout).
+local FOOTER_MIN_MONITOR_W_FOR_SCAN_BUTTON = 16
 
 local function mergeUserConfig()
  if not fs.exists("ae2colony_config.lua") then
@@ -1094,6 +1097,24 @@ local function getSpeakerPeripheral()
  return nil
 end
 
+local function scanSpeakersAndReport()
+ speakerCache = nil
+ local found = {}
+ for _, nm in ipairs(peripheral.getNames()) do
+ local ok, ty = pcall(peripheral.getType, nm)
+ if ok and ty == "speaker" then
+ found[#found + 1] = tostring(nm)
+ end
+ end
+ table.sort(found)
+ if #found < 1 then
+ print("[ae2Colony] Speaker scan: none on this computer's network (modem + speaker?).")
+ else
+ print(string.format("[ae2Colony] Speaker scan: %d — %s", #found, table.concat(found, ", ")))
+ end
+ return found
+end
+
 local function playSpeakerPattern(pattern)
  if not alerts.useSpeaker then
  return
@@ -1497,22 +1518,42 @@ local function footerAlertBarLayout(w)
  end
  local testW = math.min(FOOTER_ALERT_TEST_CHARS, w - 1)
  local xTest = w - testW + 1
- local modeW = math.min(FOOTER_ALERT_MODE_CHARS, math.max(0, xTest - 2))
+ local scanW = 0
+ local xScan = nil
+ if w >= FOOTER_MIN_MONITOR_W_FOR_SCAN_BUTTON then
+ scanW = math.min(FOOTER_ALERT_SCAN_CHARS, xTest - 2)
+ if scanW >= 4 then
+ xScan = xTest - scanW
+ end
+ end
+ local clusterLeft = xScan or xTest
+ local modeW = math.min(FOOTER_ALERT_MODE_CHARS, math.max(0, clusterLeft - 2))
  local xMode = nil
- local craftMax = xTest - 1
+ local craftMax = clusterLeft - 1
  if modeW >= 1 then
- xMode = xTest - modeW
+ xMode = clusterLeft - modeW
  craftMax = xMode - 1
  if craftMax < 0 then
  craftMax = 0
+ modeW = math.max(0, clusterLeft - 1)
+ xMode = clusterLeft - modeW
+ if modeW < 1 then
  modeW = 0
  xMode = nil
+ craftMax = clusterLeft - 1
  end
+ end
+ else
+ modeW = 0
+ xMode = nil
+ craftMax = clusterLeft - 1
  end
  return {
  xTest = xTest,
- xMode = xMode,
  testW = testW,
+ xScan = xScan,
+ scanW = scanW,
+ xMode = xMode,
  modeW = modeW,
  craftMax = craftMax,
  }
@@ -1531,7 +1572,7 @@ local function drawConstructionFooter(monitor)
  return
  end
  if not lay then
- lay = { craftMax = w, xTest = nil, xMode = nil, modeW = 0, testW = 0 }
+ lay = { craftMax = w, xTest = nil, xScan = nil, scanW = 0, xMode = nil, modeW = 0, testW = 0 }
  end
  local craftMax = lay.craftMax or 0
  if craftMax < 0 then
@@ -1571,6 +1612,12 @@ local function drawConstructionFooter(monitor)
  monitor.setTextColor(colors.gray)
  end
  monitor.write(modeLabel)
+ end
+ if lay.xScan and (lay.scanW or 0) > 0 then
+ local scanLabel = string.sub("[SCAN]" .. string.rep(" ", lay.scanW), 1, lay.scanW)
+ monitor.setCursorPos(lay.xScan, h)
+ monitor.setTextColor(colors.cyan)
+ monitor.write(scanLabel)
  end
  if lay.xTest then
  local testLabel = string.sub("[TEST]" .. string.rep(" ", lay.testW), 1, lay.testW)
@@ -2318,9 +2365,13 @@ local function handleMonitorTouch(monitor, bridge, colony)
  if h >= 5 and y == h then
  local lay = footerAlertBarLayout(w)
  local hitTest = lay and lay.xTest and x >= lay.xTest
- local hitMode = lay and lay.modeW and lay.modeW > 0 and lay.xMode and x >= lay.xMode and x < lay.xTest
+ local hitScan = lay and lay.xScan and (lay.scanW or 0) > 0 and x >= lay.xScan and x < lay.xTest
+ local modeRight = (lay and (lay.xScan or lay.xTest)) or w
+ local hitMode = lay and lay.modeW and lay.modeW > 0 and lay.xMode and x >= lay.xMode and x < modeRight
  if hitTest then
  playSpeakerTestBeep()
+ elseif hitScan then
+ scanSpeakersAndReport()
  elseif hitMode then
  if alerts.enabled then
  if alertsMuted then
@@ -2501,6 +2552,7 @@ else
  print("[ae2Colony] Alerts: OFF — set alerts.enabled in ae2colony_config.lua or tap [A:OFF] on the last line. [TEST] = speaker beep.")
  print("[ae2Colony] Optional file override (true/false): ae2colony_alerts_monitor_enabled.txt")
 end
+print("[ae2Colony] Autostart: keep startup.lua next to ae2Colony.lua (same wget folder). Monitors w>=16: last row [SCAN] lists speakers.")
 
 local function main()
  local tick = scanInterval
