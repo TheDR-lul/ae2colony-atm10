@@ -7,7 +7,7 @@ Upstream is MIT-licensed; see [LICENSE](LICENSE).
 ## Install (in-game computer)
 
 ```text
-wget run https://raw.githubusercontent.com/TheR0T/ae2colony-atm10/main/ae2Colony.lua
+wget run https://raw.githubusercontent.com/TheDR-lul/ae2colony-atm10/main/ae2Colony.lua
 ```
 
 Then run:

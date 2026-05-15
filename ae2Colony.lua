@@ -27,7 +27,7 @@ end
 --[[-------------------------------------------------------------------------------------------------------------------
 author: toastonrye
 https://github.com/toastonrye/ae2Colony/blob/main/README.md
-Public install (CC:Tweaked): wget run https://raw.githubusercontent.com/TheR0T/ae2colony-atm10/main/ae2Colony.lua
+Public install (CC:Tweaked): wget run https://raw.githubusercontent.com/TheDR-lul/ae2colony-atm10/main/ae2Colony.lua
 
 Setup
 Please see the Github for more detailed information!
