@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.5.8-atm10"
+local scriptVersion = "0.5.9-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -102,6 +102,14 @@ local mergeBuilderHutAutoScan = true
 local constructionNeedDuplicateMerge = "max"
 -- Hide NOT_NEEDED rows so the list matches "still owe the build"; set false to debug raw API rows.
 local constructionNeedsHideNotNeeded = true
+-- After footer CRAFT+EXPORT: keep exporting as ME finishes autocrafts (non-blocking drain).
+local constructionPushDrainAfterCraft = true
+local constructionPushDrainPollSeconds = 1
+local constructionPushDrainTimeoutSeconds = 180
+local constructionPushDrainMaxPerTick = 4
+-- Header line 2: show ME crafting CPU busy count (and spinner when crafting or drain pending).
+local showMeCraftingStatus = true
+local showMeCraftingSpinner = true
 local monitorGroupOrder = {
  "COLONY",
  "NEEDS",
@@ -113,6 +121,9 @@ local monitorGroupOrder = {
  "MANUAL",
  "INFO",
 }
+
+local pendingPostCraftExport = {}
+local lastPostCraftDrainMs = 0
 
 local function mergeUserConfig()
  if not fs.exists("ae2colony_config.lua") then
@@ -200,6 +211,24 @@ local function mergeUserConfig()
  end
  if tbl.constructionNeedsHideNotNeeded ~= nil then
  constructionNeedsHideNotNeeded = tbl.constructionNeedsHideNotNeeded
+ end
+ if tbl.constructionPushDrainAfterCraft ~= nil then
+ constructionPushDrainAfterCraft = tbl.constructionPushDrainAfterCraft
+ end
+ if tbl.constructionPushDrainPollSeconds ~= nil then
+ constructionPushDrainPollSeconds = tonumber(tbl.constructionPushDrainPollSeconds) or constructionPushDrainPollSeconds
+ end
+ if tbl.constructionPushDrainTimeoutSeconds ~= nil then
+ constructionPushDrainTimeoutSeconds = tonumber(tbl.constructionPushDrainTimeoutSeconds) or constructionPushDrainTimeoutSeconds
+ end
+ if tbl.constructionPushDrainMaxPerTick ~= nil then
+ constructionPushDrainMaxPerTick = tonumber(tbl.constructionPushDrainMaxPerTick) or constructionPushDrainMaxPerTick
+ end
+ if tbl.showMeCraftingStatus ~= nil then
+ showMeCraftingStatus = tbl.showMeCraftingStatus
+ end
+ if tbl.showMeCraftingSpinner ~= nil then
+ showMeCraftingSpinner = tbl.showMeCraftingSpinner
  end
  if type(tbl.missingPatternHook) == "table" then
  for mk, mv in pairs(tbl.missingPatternHook) do
@@ -1238,6 +1267,43 @@ local function bridgeDataHandler(bridge)
  return indexFingerprint
 end
 
+local function countBusyCraftingCpus(bridge)
+ if not bridge or type(bridge.getCraftingCPUs) ~= "function" then
+ return 0
+ end
+ local ok, cpus = pcall(function()
+ return bridge.getCraftingCPUs()
+ end)
+ if not ok or type(cpus) ~= "table" then
+ return 0
+ end
+ local n = 0
+ for _, c in pairs(cpus) do
+ if type(c) == "table" and c.isBusy then
+ n = n + 1
+ end
+ end
+ return n
+end
+
+local meCraftSpinChars = { "|", "/", "-", "\\" }
+local function meCraftingActivitySuffix(bridge, tick)
+ if not showMeCraftingStatus or not bridge then
+ return ""
+ end
+ local busy = countBusyCraftingCpus(bridge)
+ local pending = #pendingPostCraftExport
+ if busy < 1 and pending < 1 then
+ return ""
+ end
+ local spin = ""
+ if showMeCraftingSpinner then
+ local idx = (math.max(0, tick) % 4) + 1
+ spin = meCraftSpinChars[idx] .. " "
+ end
+ return string.format("%sMEcpu:%d q:%d ", spin, busy, pending)
+end
+
 local function updateHeader(monitor, bridge, tick, snapshot)
  if not monitor then return end
 
@@ -1265,22 +1331,36 @@ local function updateHeader(monitor, bridge, tick, snapshot)
  if snapshot and type(snapshot.headerCompact) == "string" then
  left = snapshot.headerCompact
  end
- if #left > math.floor(width * 0.58) then
- left = left:sub(1, math.max(0, math.floor(width * 0.58) - 1))
+ local suffix = meCraftingActivitySuffix(bridge, tick)
+ if #suffix > math.floor(width * 0.35) then
+ suffix = ""
+ end
+ local maxLeft = width - #suffix - 4
+ if maxLeft < 8 then
+ suffix = ""
+ maxLeft = math.floor(width * 0.58)
+ end
+ if #left > maxLeft then
+ left = left:sub(1, math.max(0, maxLeft - 1))
  end
  monitor.setCursorPos(1, 2)
  monitor.setTextColor(colors.lightGray)
  monitor.write(left)
  local used = #left
- if used < width then
- monitor.setTextColor(colors.black)
- monitor.write(string.rep(" ", width - used))
- end
- local barW = math.max(1, width - used)
- local filled = math.floor((tick / scanInterval) * barW)
+ local midSpan = math.max(1, width - used - #suffix)
+ local filled = math.floor((tick / scanInterval) * midSpan)
  monitor.setCursorPos(used + 1, 2)
  monitor.setTextColor(status and colors.green or colors.red)
- monitor.write(string.rep("#", math.min(filled, barW)))
+ local hFill = math.min(filled, midSpan)
+ monitor.write(string.rep("#", hFill))
+ if midSpan > hFill then
+ monitor.setTextColor(colors.black)
+ monitor.write(string.rep(" ", midSpan - hFill))
+ end
+ if #suffix > 0 then
+ monitor.setTextColor(colors.yellow)
+ monitor.write(suffix)
+ end
 end
 
 local function colonyRequestHandler(colony)
@@ -1396,7 +1476,6 @@ end
 local function craftHandler(request, bridgeItem, bridge, craftAmount, itemLabel, itemIdForLog)
  local craftable = false
  local payload = {}
- local ok, object = nil, nil
  local ri = request.items[1]
  local fingerprintRequest = ri.fingerprint
  local name = ri.name
@@ -1450,12 +1529,27 @@ local function craftHandler(request, bridgeItem, bridge, craftAmount, itemLabel,
  end
  end
  if craftable then
- ok, object = pcall(function() return bridge.craftItem(payload) end)
- if ok then
- logAndDisplay(formatItemAction("[CRAFT]", stackSize, label, idLog, ""))
- else
- logAndDisplay(formatItemAction("[ERROR] Failed craft", stackSize, label, idLog, ""))
+ local okInvoke, a, b = pcall(function()
+ return bridge.craftItem(payload)
+ end)
+ if not okInvoke then
+ logAndDisplay(
+ string.format("[ERROR] craftItem threw: %s x%d %s (%s)", label, stackSize, idLog, tostring(a))
+ )
+ return false
  end
+ if type(a) == "boolean" then
+ if a then
+ logAndDisplay(formatItemAction("[CRAFT]", stackSize, label, idLog, ""))
+ return true
+ end
+ logAndDisplay(
+ string.format("[ERROR] Craft start failed: %s x%d %s — %s", label, stackSize, idLog, tostring(b or "?"))
+ )
+ return false
+ end
+ logAndDisplay(formatItemAction("[CRAFT]", stackSize, label, idLog, ""))
+ return true
  else
  logAndDisplay(formatItemAction("[MISSING] No recipe", stackSize, label, idLog, ""))
  notifyMissingPatternHook({
@@ -1466,7 +1560,7 @@ local function craftHandler(request, bridgeItem, bridge, craftAmount, itemLabel,
  display_label = label,
  })
  end
- return object
+ return false
 end
 
 local function bridgeStockCountForNeed(bridge, entry)
@@ -1482,6 +1576,88 @@ local function bridgeStockCountForNeed(bridge, entry)
  return it.count
  end
  return 0
+end
+
+local function postCraftDrainKey(entry)
+ local fp = normalizeMeFingerprint(entry and entry.fingerprint)
+ local nm = entry and entry.name or ""
+ return tostring(fp or "") .. "|" .. tostring(nm)
+end
+
+local function enqueuePostCraftDrain(entry, stillNeed)
+ if not constructionPushDrainAfterCraft or stillNeed < 1 or type(entry) ~= "table" then
+ return
+ end
+ local now = os.epoch("utc")
+ local deadline = now + (constructionPushDrainTimeoutSeconds or 180) * 1000
+ local key = postCraftDrainKey(entry)
+ for i = 1, #pendingPostCraftExport do
+ local q = pendingPostCraftExport[i]
+ if q.key == key then
+ if stillNeed > q.stillNeed then
+ q.stillNeed = stillNeed
+ end
+ if deadline > q.deadlineMs then
+ q.deadlineMs = deadline
+ end
+ return
+ end
+ end
+ table.insert(pendingPostCraftExport, {
+ key = key,
+ name = entry.name,
+ fingerprint = entry.fingerprint,
+ components = entry.components or {},
+ stillNeed = stillNeed,
+ deadlineMs = deadline,
+ label = entry.displayName or prettifyItemId(entry.name or "?"),
+ idLog = entry.name or "?",
+ })
+end
+
+local function processPendingPostCraftDrain(bridge)
+ if not constructionPushDrainAfterCraft or #pendingPostCraftExport == 0 then
+ return
+ end
+ if not bridge or not confirmConnection(bridge) then
+ return
+ end
+ local now = os.epoch("utc")
+ local pollMs = math.max(1, (constructionPushDrainPollSeconds or 1) * 1000)
+ if now < lastPostCraftDrainMs + pollMs then
+ return
+ end
+ lastPostCraftDrainMs = now
+ local maxPer = math.max(1, constructionPushDrainMaxPerTick or 4)
+ local processed = 0
+ local i = 1
+ while i <= #pendingPostCraftExport and processed < maxPer do
+ local q = pendingPostCraftExport[i]
+ local entry = {
+ name = q.name,
+ fingerprint = q.fingerprint,
+ components = q.components,
+ }
+ if now > q.deadlineMs then
+ logAndDisplay(
+ string.format("[WARN] Post-craft export timeout: %s (%d left)", q.label or "?", q.stillNeed or 0)
+ )
+ table.remove(pendingPostCraftExport, i)
+ else
+ local stock = bridgeStockCountForNeed(bridge, entry)
+ local move = math.min(stock, q.stillNeed)
+ if move > 0 then
+ queueExport(q.fingerprint, move, q.name, "work-order", nil, q.label, q.idLog, q.components)
+ q.stillNeed = q.stillNeed - move
+ end
+ if q.stillNeed < 1 then
+ table.remove(pendingPostCraftExport, i)
+ else
+ i = i + 1
+ end
+ end
+ processed = processed + 1
+ end
 end
 
 -- One-shot: export what is already in ME for NEEDS rows, then request autocraft for the remainder.
@@ -1545,11 +1721,16 @@ local function manualConstructionPush(bridge, colony, monitor)
  components = comps,
  }
  local fakeReq = { count = remain, target = "work-order", items = { fakeRi } }
- craftHandler(fakeReq, nil, bridge, remain, label, idLog)
+ local craftStarted = craftHandler(fakeReq, nil, bridge, remain, label, idLog)
+ if constructionPushDrainAfterCraft and remain > 0 and craftStarted then
+ enqueuePostCraftDrain(entry, remain)
  end
  end
  end
  end
+ end
+ lastPostCraftDrainMs = 0
+ processPendingPostCraftDrain(bridge)
  processExportBuffer(bridge)
 end
 
@@ -1711,6 +1892,7 @@ local function main()
  local nextUiMs = 0
  while true do
  exportBuffer = {}
+ processPendingPostCraftDrain(bridge)
  monitorLines = {}
  monitorColonyPrefixLines = {}
  local nowScan = os.epoch("utc")
@@ -1745,6 +1927,10 @@ local function main()
  local online = confirmConnection(bridge)
  if online then
  tick = tick - 1
+ end
+ processPendingPostCraftDrain(bridge)
+ if #exportBuffer > 0 then
+ processExportBuffer(bridge)
  end
  updateHeader(monitor, bridge, tick, colonyUiSnapshot)
  os.sleep(1)
