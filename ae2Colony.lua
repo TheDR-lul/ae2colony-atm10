@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.6.4-atm10"
+local scriptVersion = "0.6.5-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -169,10 +169,10 @@ local FOOTER_ALERT_MODE_CHARS = 8
 local FOOTER_MIN_MONITOR_W_FOR_SCAN_BUTTON = 16
 
 -- Monitor layout: "classic" (single column) or "scada" (split body; needs scada.enabled + wide monitor).
-local uiMode = "classic"
+local uiMode = "scada"
 -- Experimental SCADA metrics (citizen saturation, ME food whitelist, local heuristic trends). See docs/SCADA.md.
 local scada = {
- enabled = false,
+ enabled = true,
  intervalSec = 15,
  minMonitorWidth = 26,
  leftBodyFraction = 0.58,
