@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.5.13-atm10"
+local scriptVersion = "0.5.14-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -1310,29 +1310,6 @@ local function updateMonitorGrouped(monitor)
  end
 end
 
-local function drawConstructionFooter(monitor)
- if not monitor or not showConstructionPushFooter then
- return
- end
- local w, h = monitor.getSize()
- if h < 5 then
- return
- end
- monitor.setCursorPos(1, h)
- monitor.setTextColor(colors.yellow)
- local txt = ">>> CRAFT+EXPORT (NEEDS) <<<"
- if #txt > w then
- txt = "> CRAFT+EXPORT <"
- end
- monitor.write(txt .. string.rep(" ", math.max(0, w - #txt)))
-end
-
-local function refreshMonitorBody(monitor, bridgeForPin)
- rebuildPinnedLines(bridgeForPin, colonyUiSnapshot)
- updateMonitorGrouped(monitor)
- drawConstructionFooter(monitor)
-end
-
 local function logAndDisplay(msg)
  logLine(msg)
  table.insert(monitorLines, msg)
@@ -1423,6 +1400,29 @@ local function rebuildPinnedLines(bridge, snap)
  if snap.breakerActive then
  add("[ALERT] getBuildings API disabled (breaker)", colors.orange)
  end
+end
+
+local function drawConstructionFooter(monitor)
+ if not monitor or not showConstructionPushFooter then
+ return
+ end
+ local w, h = monitor.getSize()
+ if h < 5 then
+ return
+ end
+ monitor.setCursorPos(1, h)
+ monitor.setTextColor(colors.yellow)
+ local txt = ">>> CRAFT+EXPORT (NEEDS) <<<"
+ if #txt > w then
+ txt = "> CRAFT+EXPORT <"
+ end
+ monitor.write(txt .. string.rep(" ", math.max(0, w - #txt)))
+end
+
+local function refreshMonitorBody(monitor, bridgeForPin)
+ rebuildPinnedLines(bridgeForPin, colonyUiSnapshot)
+ updateMonitorGrouped(monitor)
+ drawConstructionFooter(monitor)
 end
 
 -- Newer me_bridge builds reject filters with only fingerprint — require a registry `name` ("mod:id") when possible.
