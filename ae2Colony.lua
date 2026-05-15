@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.6.0-atm10"
+local scriptVersion = "0.6.1-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -1524,15 +1524,6 @@ local function setupMonitor()
  return monitor
 end
 
-local function setupMonitor()
- local monitor = peripheral.find("monitor")
- if not monitor then return nil end
- monitor.setTextScale(0.5)
- monitor.clear()
- monitor.setCursorPos(1, 1)
- return monitor
-end
-
 local function buildGroupedMonitorFlatLines()
  local flatLines = {}
  local colorsMap = {
@@ -3010,7 +3001,8 @@ local function main()
  end
 end
 
-parallel.waitForAll(
- main,
- function() handleMonitorTouch(monitor, bridge, colony) end
-)
+parallel.waitForAll(function()
+ main()
+end, function()
+ handleMonitorTouch(monitor, bridge, colony)
+end)
