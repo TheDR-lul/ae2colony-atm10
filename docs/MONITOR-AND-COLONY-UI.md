@@ -23,8 +23,8 @@ MineColonies + Advanced Peripherals **do not** expose a single “% of blocks pl
 The script shows:
 
 - **Light stats** (every `colonyUiInterval` seconds, default 5): colony name, `amountOfConstructionSites`, citizens vs max, happiness, under-attack flag.
-- **Work orders** (if `showConstructionDetail`, default on): up to **3** highest-priority work orders with building name, target level, claimed flag, plus **one** summary line of top resource from the highest-priority order.
-- **NEEDS list** (if `showConstructionNeedsList`, default on): merged from `getWorkOrderResources` for the top **N** work orders **plus** (if `mergeBuilderHutResources`, default on) **`getBuilderResources({x,y,z})`** at each order’s `builder` position — this second call usually matches the **in-game “Required resources”** list better than `getRequests()`.
+- **Work orders** (if `showConstructionDetail`, default on): up to **3** highest-priority work orders with building name, target level, claimed flag, plus **`[COLONY] Top need`** — the same row as the first line in **NEEDS** after merge/sort (**v0.5.5+**).
+- **NEEDS list** (if `showConstructionNeedsList`, default on): merged from `getWorkOrderResources` for the top **N** work orders **plus** (if `mergeBuilderHutResources`, default on) **`getBuilderResources({x,y,z})`**. **v0.5.5:** duplicate item lines from both APIs merge with **`max`** by default (`constructionNeedDuplicateMerge`); **`NOT_NEEDED`** rows are hidden by default (`constructionNeedsHideNotNeeded`) so counts reflect what is still relevant to supply.
 - **Buildings list** (if `showBuildingsList`, default **off**): up to **2** entries where `built == false` or `isWorkingOn`. If `getBuildings()` errors (known issue on some MineColonies builds), the script trips a **circuit breaker** and disables that call for `buildingsBreakerMinutes` (default 30).
 
 `getRequests()` is **only** the colony’s open **warehouse / delivery** request lines. **Construction “Required resources”** in the MineColonies GUI comes from **work orders** / **builder hut** data — that is why the script can show a full **NEEDS** block while `== INFO ==` still says no `getRequests()` lines. If **NEEDS** was empty while **COLONY / Top need** showed a line, older builds used `#res` (Lua length) on a sparse resource table — **v0.5.3** walks all numeric keys and unwraps `item` tables. If the computer crashes with **“Generic filter requires either field type or name”**, update to **v0.5.4+** (stricter `me_bridge` filters).
@@ -39,10 +39,11 @@ Optional `ae2colony_config.lua` next to the script. Copy from [`ae2colony_config
 
 ## Manual test checklist
 
-1. **Latest script:** `wget run` the `main/ae2Colony.lua` URL, run `ae2Colony`, confirm version **0.5.4-atm10** (or newer) on line 1.
+1. **Latest script:** `wget run` the `main/ae2Colony.lua` URL, run `ae2Colony`, confirm version **0.5.5-atm10** (or newer) on line 1.
 2. **Stable frozen:** `wget run` the `releases/ae2Colony-v0.4.6.lua` URL — version **0.4.6-atm10**, no COLONY block in grouped list.
 3. **Monitor sizes:** try 4-wide and 8-wide monitors; header and colony strip must not overlap status text; page flip still works.
 4. **Colony strip:** with an active build, COLONY lines appear; with no builds, strip may show only name + stats.
 5. **`showBuildingsList = true`:** if server stays up and no `[WARN] getBuildings disabled` appears, API is compatible; if warn appears, breaker engaged — wait 30m or lower `buildingsBreakerMinutes` in config for testing.
 6. **Regression:** `[SENT]` / ledger file / partial craft + remainder craft still behave as in v0.4.6.
 7. **NEEDS + footer:** With an active build order, `== NEEDS ==` lists materials; tap the bottom **CRAFT+EXPORT** line — expect `[MANUAL]` summary, then `[SENT]` / `[CRAFT]` / `[MISSING]` lines as appropriate. Tapping above the footer still cycles pages.
+8. **Counts (v0.5.5+):** `[COLONY] Top need` item name, quantity, and status match the first `[NEEDS]` line; `NOT_NEEDED` rows should not appear unless `constructionNeedsHideNotNeeded = false`.

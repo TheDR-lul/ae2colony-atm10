@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.5.4-atm10"
+local scriptVersion = "0.5.5-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -95,6 +95,10 @@ local constructionNeedsMaxItems = 14
 local showConstructionPushFooter = true
 -- Also merge colony.getBuilderResources(builderPos) into NEEDS (often closer to the in-game construction list).
 local mergeBuilderHutResources = true
+-- Same item from WO + builder APIs often duplicates; "max" avoids inflated counts. Use "sum" only if you know you need additive merge.
+local constructionNeedDuplicateMerge = "max"
+-- Hide NOT_NEEDED rows so the list matches "still owe the build"; set false to debug raw API rows.
+local constructionNeedsHideNotNeeded = true
 local monitorGroupOrder = {
  "COLONY",
  "NEEDS",
@@ -184,6 +188,12 @@ local function mergeUserConfig()
  end
  if tbl.mergeBuilderHutResources ~= nil then
   mergeBuilderHutResources = tbl.mergeBuilderHutResources
+ end
+ if tbl.constructionNeedDuplicateMerge == "sum" or tbl.constructionNeedDuplicateMerge == "max" then
+  constructionNeedDuplicateMerge = tbl.constructionNeedDuplicateMerge
+ end
+ if tbl.constructionNeedsHideNotNeeded ~= nil then
+  constructionNeedsHideNotNeeded = tbl.constructionNeedsHideNotNeeded
  end
  if type(tbl.missingPatternHook) == "table" then
   for mk, mv in pairs(tbl.missingPatternHook) do
@@ -455,24 +465,6 @@ local function fetchColonyUiSnapshot(colony, nowMs)
      string.format("[COLONY] WO %s ->Lv%s %s pri=%s", tostring(bn), tlStr, cl, tostring(pri))
     )
    end
-   if top > 0 and list[1] and list[1].id ~= nil then
-    local okR, res = pcall(function()
-     return colony.getWorkOrderResources(list[1].id)
-    end)
-    if okR and type(res) == "table" then
-     local rows = collectResourceRows(res)
-     if #rows > 0 then
-      local r = rows[1]
-      local rn = r.displayName or itemIdFromNeedRow(r) or "?"
-      local rq = quantityFromNeedRow(r)
-      table.insert(
-       lines,
-       string.format("[COLONY] Top need: %s x%s (%s)", tostring(rn), tostring(rq), tostring(r.status or "?"))
-      )
-     end
-    end
-   end
-
    if showConstructionNeedsList and top > 0 then
     local needsMap = {}
     local function mergeNeedRow(woId, r)
@@ -496,7 +488,11 @@ local function fetchColonyUiSnapshot(colony, nowMs)
      end
      local prev = needsMap[key]
      if prev then
-      prev.needed = prev.needed + n
+      if constructionNeedDuplicateMerge == "sum" then
+       prev.needed = prev.needed + n
+      else
+       prev.needed = math.max(prev.needed, n)
+      end
       if st == "DONT_HAVE" then
        prev.status = "DONT_HAVE"
       end
@@ -553,7 +549,9 @@ local function fetchColonyUiSnapshot(colony, nowMs)
 
     local flat = {}
     for _, row in pairs(needsMap) do
-     flat[#flat + 1] = row
+     if not (constructionNeedsHideNotNeeded and tostring(row.status or "") == "NOT_NEEDED") then
+      flat[#flat + 1] = row
+     end
     end
     table.sort(flat, function(a, b)
      local sa = a.status == "DONT_HAVE" and 0 or 1
@@ -563,6 +561,14 @@ local function fetchColonyUiSnapshot(colony, nowMs)
      end
      return tostring(a.displayName or a.name) < tostring(b.displayName or b.name)
     end)
+    if #flat > 0 then
+     local tr = flat[1]
+     local tlab = tr.displayName or prettifyItemId(tr.name or "?")
+     table.insert(
+      lines,
+      string.format("[COLONY] Top need: %s x%d (%s)", tlab, tr.needed, tr.status)
+     )
+    end
     local cap = math.max(1, constructionNeedsMaxItems or 14)
     for i = 1, math.min(#flat, cap) do
      local row = flat[i]
@@ -584,6 +590,22 @@ local function fetchColonyUiSnapshot(colony, nowMs)
     end
     if #flat > cap then
      table.insert(needsLines, string.format("[NEEDS] ... +%d more (see log)", #flat - cap))
+    end
+   elseif showConstructionDetail and top > 0 and list[1] and list[1].id ~= nil then
+    local okR, res = pcall(function()
+     return colony.getWorkOrderResources(list[1].id)
+    end)
+    if okR and type(res) == "table" then
+     local rows = collectResourceRows(res)
+     if #rows > 0 then
+      local r = rows[1]
+      local rn = r.displayName or itemIdFromNeedRow(r) or "?"
+      local rq = quantityFromNeedRow(r)
+      table.insert(
+       lines,
+       string.format("[COLONY] Top need: %s x%s (%s)", tostring(rn), tostring(rq), tostring(r.status or "?"))
+      )
+     end
     end
    end
   end

@@ -13,6 +13,8 @@ return {
   constructionNeedsMaxItems = 14,
   showConstructionPushFooter = true,
   mergeBuilderHutResources = true,
+  constructionNeedDuplicateMerge = "max",
+  constructionNeedsHideNotNeeded = true,
   showBuildingsList = false,
   buildingsBreakerMinutes = 30,
   maxLinesPerGroup = 12,

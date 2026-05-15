@@ -23,6 +23,10 @@ ae2Colony
 
 (Optional) Save as `startup.lua` with `shell.run("ae2Colony")` for autostart.
 
+### v0.5.5 highlights
+
+- **NEEDS vs Top need:** one merged list; `Top need` = first row after sort. Duplicate WO+builder counts use **`max`**; **`NOT_NEEDED`** hidden by default.
+
 ### v0.5.4 highlights
 
 - **me_bridge filters:** newer Advanced Peripherals reject `getItem` / `isCraftable` / `exportItem` filters that only have `fingerprint` without a registry **`name`** (`mod:id`). The script now builds filters via `buildMeItemFilter` and wraps `isCraftable` in `pcall` so one bad row does not crash the computer.
