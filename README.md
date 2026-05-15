@@ -4,6 +4,8 @@ Public fork of [toastonrye/ae2Colony](https://github.com/toastonrye/ae2Colony) f
 
 Upstream is MIT-licensed; see [LICENSE](LICENSE).
 
+**Russian “press the button” setup (chest on ME bridge, colony build):** [docs/SIMPLE-RU.md](docs/SIMPLE-RU.md)
+
 ## Install (in-game computer)
 
 ```text

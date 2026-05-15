@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.4.3-atm10"
+local scriptVersion = "0.4.4-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -45,7 +45,15 @@ Srendi - Advanced Peripherals dev, fast support for bug troubleshooting!
 ---------------------------------------------------------------------------------------------------------------------]]
 
 -- [USER CONFIG] ------------------------------------------------------------------------------------------------------
-local exportSide = "front"
+-- Export direction is relative to the **ME bridge block**, not the computer.
+-- Typical build: chest **on top** of the ME bridge -> use "top".
+-- Other values AP accepts: "bottom", "front", "back", "left", "right", or cardinal "north","south","east","west","up","down".
+-- Docs: https://docs.advanced-peripherals.de/latest/peripherals/me_bridge/#exportitem
+local exportSide = "top"
+
+-- Optional: export into a wired-modem chest/inventory by its ComputerCraft peripheral name (run the `peripherals` program).
+-- Example: "minecraft:chest_0". When set, this overrides `exportSide`.
+local exportChestPeripheral = nil
 local craftMaxStack = false -- Autocraft exact or a stack. ie 3 logs vs 64 logs.
 local scanInterval = 30 -- Probably shouldn't go much lower than 20s...
 local doLog = false -- Leave false unless you have issues. Kinda spammy!
@@ -321,18 +329,22 @@ end
 
 local function processExportBuffer(bridge)
  for _, item in ipairs(exportBuffer) do
+ local payload = {
+  fingerprint = item.fingerprint,
+  name = item.name,
+  count = item.count,
+  components = {}
+ }
  local ok, result = pcall(function()
- return bridge.exportItem({
- fingerprint = item.fingerprint,
- name = item.name,
- count = item.count,
- components = {}
- }, exportSide)
+  if exportChestPeripheral and #exportChestPeripheral > 0 then
+   return bridge.exportItemToPeripheral(payload, exportChestPeripheral)
+  end
+  return bridge.exportItem(payload, exportSide)
  end)
  if not ok or not result then
- logAndDisplay(string.format("[ERROR] x%d %s [%s] > %s", item.count, item.name, item.fingerprint, item.target))
+  logAndDisplay(string.format("[ERROR] x%d %s [%s] > %s", item.count, item.name, tostring(item.fingerprint), item.target))
  else
- logAndDisplay(string.format("[SENT] x%d %s [%s] > %s", item.count, item.name, item.fingerprint, item.target))
+  logAndDisplay(string.format("[SENT] x%d %s [%s] > %s", item.count, item.name, tostring(item.fingerprint), item.target))
  end
  end
 end
@@ -650,6 +662,11 @@ local bridge, colony, monitor = setupPeripherals()
 local title = string.format("[INFO] %s v%s initialized", scriptName, scriptVersion)
 print(title)
 logLine(title)
+if exportChestPeripheral and #exportChestPeripheral > 0 then
+ print(string.format("[ae2Colony] ME export -> peripheral '%s' (exportSide ignored).", exportChestPeripheral))
+else
+ print(string.format("[ae2Colony] ME export -> bridge side '%s'. Chest not filling? Change exportSide (see docs/SIMPLE-RU.md).", exportSide))
+end
 
 local function main()
  local tick = scanInterval
