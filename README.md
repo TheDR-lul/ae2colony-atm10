@@ -6,6 +6,7 @@ Upstream is MIT-licensed; see [LICENSE](LICENSE).
 
 **Russian “press the button” setup:** [docs/SIMPLE-RU.md](docs/SIMPLE-RU.md)  
 **Monitor + colony UI + config (v0.5.0+):** [docs/MONITOR-AND-COLONY-UI.md](docs/MONITOR-AND-COLONY-UI.md)  
+**Alerts, pinned lines, NEEDS diff (v0.5.12+):** [docs/ALERTS.md](docs/ALERTS.md)  
 **Optional config template:** [ae2colony_config.example.lua](ae2colony_config.example.lua) (copy to `ae2colony_config.lua` on the computer)
 
 ## Install tracks
@@ -22,6 +23,13 @@ ae2Colony
 ```
 
 (Optional) Save as `startup.lua` with `shell.run("ae2Colony")` for autostart.
+
+### v0.5.12 highlights
+
+- **Pinned `[ALERT]` rows** at the top of the monitor when ME is offline, the colony is under attack, or the `getBuildings` API breaker is active.
+- **Optional speaker + redstone** alerts (debounced) for raid, ME offline/online, missing patterns, post-craft export timeout, `getRequests` critical failure, and more — see [docs/ALERTS.md](docs/ALERTS.md).
+- **Optional NEEDS diff** (`showConstructionNeedsDiff`): `+` / `-` / `~` lines when the merged material list changes.
+- **`[COLONY] Blocking:`** summary: count of `DONT_HAVE` rows among listed NEEDS.
 
 ### v0.5.6 highlights
 

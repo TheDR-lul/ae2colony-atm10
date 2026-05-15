@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.5.11-atm10"
+local scriptVersion = "0.5.12-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -69,7 +69,7 @@ local doLogExtra = false -- If true more info printed to log file.
 local logFolder = "ae2Colony_logs"
 local maxLogs = 10
 local maxLogSize = 200*1024 -- 100 KB
-local alarm = nil -- Used to update monitor for errors.
+local alarm = nil -- Used to update monitor for errors (getRequests failure); see alarmInfo + alerts.
 
 -- When AE2 has no autocraft recipe, optionally notify an out-of-game hook (HTTP) and/or append JSONL locally.
 -- Full "create encoded pattern + insert into ExtendedAE Assembly Matrix" is NOT possible from Lua alone; see docs/AUTO_PATTERN_ATM10.md
@@ -112,6 +112,29 @@ local showMeCraftingStatus = true
 local showMeCraftingSpinner = true
 -- Extra header line (line 3): progress bar + last craft orders (needs monitor height >= 8).
 local showMeCraftingHudLine = true
+-- Optional NEEDS diff vs previous colony UI refresh (same keys as internal need map).
+local showConstructionNeedsDiff = false
+local constructionNeedsDiffMaxLines = 4
+-- Pinned [ALERT] lines at top of monitor body (max count); see docs/ALERTS.md
+local pinnedAlertsMaxLines = 3
+-- Speaker / redstone alerts (debounced). Peripheral: same network or `speakerPeripheralName`.
+local alerts = {
+ enabled = false,
+ minIntervalSec = 10,
+ useSpeaker = true,
+ speakerPeripheralName = nil,
+ useRedstone = false,
+ redstoneSide = "back",
+ redstonePulseTicks = 2,
+ onRaid = true,
+ onMeOffline = true,
+ onMeOnline = false,
+ onMissingPattern = true,
+ onPostCraftTimeout = true,
+ onGetBuildingsBreaker = true,
+ onColonyRequestsCritical = true,
+ onCraftStarted = false,
+}
 local monitorGroupOrder = {
  "COLONY",
  "NEEDS",
@@ -128,6 +151,11 @@ local pendingPostCraftExport = {}
 local lastPostCraftDrainMs = 0
 -- Last N craft orders started (for HUD "what went to craft").
 local recentCraftOrders = {}
+-- Pinned monitor rows (rebuilt before each body draw).
+local pinnedDisplayLines = {}
+-- NEEDS diff: previous snapshot map key -> { needed, status, label }
+local lastNeedsForDiff = nil
+local triggerAlert
 
 local function mergeUserConfig()
  if not fs.exists("ae2colony_config.lua") then
@@ -236,6 +264,20 @@ local function mergeUserConfig()
  end
  if tbl.showMeCraftingHudLine ~= nil then
  showMeCraftingHudLine = tbl.showMeCraftingHudLine
+ end
+ if tbl.showConstructionNeedsDiff ~= nil then
+ showConstructionNeedsDiff = tbl.showConstructionNeedsDiff
+ end
+ if tbl.constructionNeedsDiffMaxLines ~= nil then
+ constructionNeedsDiffMaxLines = tonumber(tbl.constructionNeedsDiffMaxLines) or constructionNeedsDiffMaxLines
+ end
+ if tbl.pinnedAlertsMaxLines ~= nil then
+ pinnedAlertsMaxLines = tonumber(tbl.pinnedAlertsMaxLines) or pinnedAlertsMaxLines
+ end
+ if type(tbl.alerts) == "table" then
+ for ak, av in pairs(tbl.alerts) do
+ alerts[ak] = av
+ end
  end
  if type(tbl.missingPatternHook) == "table" then
  for mk, mv in pairs(tbl.missingPatternHook) do
@@ -353,7 +395,15 @@ local function syncExportLedger(colonyRequests)
  end
 end
 
-local colonyUiSnapshot = { headerCompact = "", lines = {}, needsLines = {}, needsEntries = {} }
+local colonyUiSnapshot = {
+ headerCompact = "",
+ lines = {},
+ needsLines = {},
+ needsEntries = {},
+ underAttack = false,
+ breakerActive = false,
+ breakerJustTripped = false,
+}
 
 -- AP / CC may return resource lists as sparse arrays, mixed maps, or { resources = {...} }; #tbl is then wrong.
 local function collectResourceRows(res)
@@ -570,6 +620,7 @@ local function fetchColonyUiSnapshot(colony, nowMs)
  local needsLines = {}
  local needsEntries = {}
  local parts = {}
+ local breakerJustTripped = false
  local function pcallNum(fn)
  local ok, v = pcall(fn)
  if ok and v ~= nil then
@@ -611,9 +662,7 @@ local function fetchColonyUiSnapshot(colony, nowMs)
  local okA, attack = pcall(function()
  return colony.isUnderAttack()
  end)
- if okA and attack then
- table.insert(lines, "[WARN] Colony UNDER ATTACK")
- end
+ local underAttackFlag = (okA and attack) and true or false
  if showConstructionDetail then
  local okW, wo = pcall(function()
  return colony.getWorkOrders()
@@ -774,6 +823,18 @@ local function fetchColonyUiSnapshot(colony, nowMs)
  lines,
  string.format("[COLONY] Top need: %s x%d (%s)%s", tlab, tr.needed, tr.status, sfx)
  )
+ local dontHaveRows = 0
+ for _, row in ipairs(flat) do
+ if tostring(row.status or "") == "DONT_HAVE" then
+ dontHaveRows = dontHaveRows + 1
+ end
+ end
+ if dontHaveRows > 0 then
+ table.insert(
+ lines,
+ string.format("[COLONY] Blocking: %d DONT_HAVE (of %d listed)", dontHaveRows, #flat)
+ )
+ end
  end
  local cap = math.max(1, constructionNeedsMaxItems or 14)
  for i = 1, math.min(#flat, cap) do
@@ -845,7 +906,56 @@ local function fetchColonyUiSnapshot(colony, nowMs)
  end
  else
  buildingsDisabledUntil = nowMs + buildingsBreakerMs
+ breakerJustTripped = true
  table.insert(lines, "[WARN] getBuildings disabled (API error; see docs)")
+ end
+ end
+ if showConstructionNeedsDiff then
+ if type(needsEntries) == "table" and #needsEntries > 0 then
+ local function needDiffKey(e)
+ return tostring(e.fingerprint or "")
+ .. "|"
+ .. tostring(e.name or "")
+ .. "|"
+ .. tostring(e.workOrderId or "")
+ end
+ local newMap = {}
+ for _, e in ipairs(needsEntries) do
+ local k = needDiffKey(e)
+ newMap[k] = {
+ needed = tonumber(e.needed) or 0,
+ status = tostring(e.status or "?"),
+ label = tostring(e.displayName or prettifyItemId(e.name or "?")),
+ }
+ end
+ if type(lastNeedsForDiff) == "table" then
+ local diffBuf = {}
+ for k, nv in pairs(newMap) do
+ local ov = lastNeedsForDiff[k]
+ if not ov then
+ table.insert(diffBuf, string.format("[NEEDS] + %s x%d %s", nv.label, nv.needed, nv.status))
+ elseif ov.needed ~= nv.needed or ov.status ~= nv.status then
+ table.insert(
+ diffBuf,
+ string.format("[NEEDS] ~ %s x%d->x%d %s", nv.label, ov.needed, nv.needed, nv.status)
+ )
+ end
+ end
+ for k, ov in pairs(lastNeedsForDiff) do
+ if not newMap[k] then
+ table.insert(diffBuf, string.format("[NEEDS] - %s (was x%d)", ov.label, ov.needed))
+ end
+ end
+ table.sort(diffBuf)
+ local cap = math.max(1, constructionNeedsDiffMaxLines or 4)
+ local toShow = math.min(#diffBuf, cap)
+ for i = toShow, 1, -1 do
+ table.insert(needsLines, 1, diffBuf[i])
+ end
+ end
+ lastNeedsForDiff = newMap
+ else
+ lastNeedsForDiff = {}
  end
  end
  return {
@@ -853,6 +963,9 @@ local function fetchColonyUiSnapshot(colony, nowMs)
  lines = lines,
  needsLines = needsLines,
  needsEntries = needsEntries,
+ underAttack = underAttackFlag,
+ breakerActive = (buildingsDisabledUntil or 0) > nowMs,
+ breakerJustTripped = breakerJustTripped,
  }
 end
 
@@ -875,6 +988,139 @@ local whitelistItemName = {
 }
 
 mergeUserConfig()
+
+local alertKindToConfig = {
+ raid = "onRaid",
+ me_offline = "onMeOffline",
+ me_online = "onMeOnline",
+ missing_pattern = "onMissingPattern",
+ post_craft_timeout = "onPostCraftTimeout",
+ get_buildings_breaker = "onGetBuildingsBreaker",
+ colony_requests_critical = "onColonyRequestsCritical",
+ craft_started = "onCraftStarted",
+}
+local lastAlertFireMs = {}
+local speakerCache = nil
+
+local function getSpeakerPeripheral()
+ if speakerCache == false then
+ return nil
+ end
+ if type(speakerCache) == "table" then
+ return speakerCache
+ end
+ local name = alerts.speakerPeripheralName
+ local wrap
+ if type(name) == "string" and #name > 0 then
+ wrap = peripheral.wrap(name)
+ else
+ local n = peripheral.find("speaker")
+ if type(n) == "string" and #n > 0 then
+ wrap = peripheral.wrap(n)
+ elseif type(n) == "table" then
+ wrap = n
+ end
+ end
+ if wrap and type(wrap.playNote) == "function" then
+ speakerCache = wrap
+ return wrap
+ end
+ speakerCache = false
+ return nil
+end
+
+local function playSpeakerPattern(pattern)
+ if not alerts.useSpeaker then
+ return
+ end
+ local sp = getSpeakerPeripheral()
+ if not sp then
+ return
+ end
+ for _, n in ipairs(pattern) do
+ local inst = n[1] or "harp"
+ local vol = n[2] or 1
+ local pitch = n[3] or 12
+ pcall(function()
+ sp.playNote(inst, vol, pitch)
+ end)
+ os.sleep(0.08)
+ end
+end
+
+local function pulseRedstoneAlert()
+ if not alerts.useRedstone then
+ return
+ end
+ local side = alerts.redstoneSide or "back"
+ local ticks = math.max(1, tonumber(alerts.redstonePulseTicks) or 2)
+ pcall(function()
+ redstone.setOutput(side, true)
+ end)
+ os.sleep(0.05 * ticks)
+ pcall(function()
+ redstone.setOutput(side, false)
+ end)
+end
+
+triggerAlert = function(kind)
+ if not alerts.enabled then
+ return
+ end
+ local cfgKey = alertKindToConfig[kind]
+ if not cfgKey or not alerts[cfgKey] then
+ return
+ end
+ local minMs = math.max(500, (tonumber(alerts.minIntervalSec) or 10) * 1000)
+ local now = os.epoch("utc")
+ local last = lastAlertFireMs[kind] or 0
+ if now - last < minMs then
+ return
+ end
+ lastAlertFireMs[kind] = now
+ local patterns = {
+ raid = {
+ { "bell", 2, 12 },
+ { "bell", 2, 14 },
+ { "bell", 2, 12 },
+ },
+ me_offline = { { "bass", 2, 6 } },
+ me_online = { { "harp", 1, 14 } },
+ missing_pattern = { { "bit", 1, 8 }, { "bit", 1, 6 } },
+ post_craft_timeout = { { "bass", 2, 4 }, { "bass", 2, 2 } },
+ get_buildings_breaker = { { "hat", 1, 5 } },
+ colony_requests_critical = { { "bass", 3, 2 }, { "bass", 3, 4 } },
+ craft_started = { { "harp", 1, 10 }, { "harp", 1, 12 } },
+ }
+ local pat = patterns[kind]
+ if pat then
+ playSpeakerPattern(pat)
+ end
+ pulseRedstoneAlert()
+end
+
+local function rebuildPinnedLines(bridge, snap)
+ pinnedDisplayLines = {}
+ if not snap then
+ return
+ end
+ local cap = math.max(1, tonumber(pinnedAlertsMaxLines) or 3)
+ local function add(msg, col)
+ if #pinnedDisplayLines >= cap then
+ return
+ end
+ pinnedDisplayLines[#pinnedDisplayLines + 1] = { text = msg, color = col }
+ end
+ if bridge and not confirmConnection(bridge) then
+ add("[ALERT] ME bridge OFFLINE", colors.red)
+ end
+ if snap.underAttack then
+ add("[ALERT] Colony UNDER ATTACK", colors.red)
+ end
+ if snap.breakerActive then
+ add("[ALERT] getBuildings API disabled (breaker)", colors.orange)
+ end
+end
 
 -- [TOOLS & ARMOUR LOOKUPS]----------------------------------------------------------------------------------------------------
 -- QUESTION: It maybe better to just have colonists make tools and armour?
@@ -1047,6 +1293,26 @@ local function updateMonitorGrouped(monitor)
  end
  end
 
+ local pin = pinnedDisplayLines or {}
+ local pinFlat = {}
+ local pinMax = math.min(#pin, math.max(0, tonumber(pinnedAlertsMaxLines) or 3))
+ for i = 1, pinMax do
+ local row = pin[i]
+ if row and type(row.text) == "string" then
+ pinFlat[#pinFlat + 1] = { text = row.text, color = row.color or colors.red }
+ end
+ end
+ if #pinFlat > 0 then
+ local merged = {}
+ for i = 1, #pinFlat do
+ merged[#merged + 1] = pinFlat[i]
+ end
+ for i = 1, #flatLines do
+ merged[#merged + 1] = flatLines[i]
+ end
+ flatLines = merged
+ end
+
  totalPages = math.ceil(#flatLines / maxLines)
  if currentPage > totalPages then currentPage = 1 end
  local startLine = (currentPage - 1) * maxLines + 1
@@ -1084,7 +1350,8 @@ local function drawConstructionFooter(monitor)
  monitor.write(txt .. string.rep(" ", math.max(0, w - #txt)))
 end
 
-local function refreshMonitorBody(monitor)
+local function refreshMonitorBody(monitor, bridgeForPin)
+ rebuildPinnedLines(bridgeForPin, colonyUiSnapshot)
  updateMonitorGrouped(monitor)
  drawConstructionFooter(monitor)
 end
@@ -1258,6 +1525,9 @@ local function processExportBuffer(bridge)
 end
 
 local function alarmInfo(result)
+ if result ~= nil and alerts and alerts.enabled then
+ triggerAlert("colony_requests_critical")
+ end
 end
 
 -- [HANDLERS] ---------------------------------------------------------------------------------------------------------
@@ -1520,6 +1790,7 @@ local function colonyRequestHandler(colony)
  local msg = string.format("[ERROR] Critical failure for colony_integrator getRequests().")
  print(msg)
  logLine(msg)
+ alarmInfo(result)
  os.sleep(1)
  end
 end
@@ -1678,6 +1949,7 @@ local function craftHandler(request, bridgeItem, bridge, craftAmount, itemLabel,
  if a then
  logAndDisplay(formatItemAction("[CRAFT]", stackSize, label, idLog, ""))
  pushRecentCraftOrder(label, idLog, stackSize)
+ triggerAlert("craft_started")
  return true
  end
  logAndDisplay(
@@ -1687,6 +1959,7 @@ local function craftHandler(request, bridgeItem, bridge, craftAmount, itemLabel,
  end
  logAndDisplay(formatItemAction("[CRAFT]", stackSize, label, idLog, ""))
  pushRecentCraftOrder(label, idLog, stackSize)
+ triggerAlert("craft_started")
  return true
  else
  logAndDisplay(formatItemAction("[MISSING] No recipe", stackSize, label, idLog, ""))
@@ -1697,6 +1970,7 @@ local function craftHandler(request, bridgeItem, bridge, craftAmount, itemLabel,
  target = (request and (request.target or request.name)) or "",
  display_label = label,
  })
+ triggerAlert("missing_pattern")
  end
  return false
 end
@@ -1782,6 +2056,7 @@ local function processPendingPostCraftDrain(bridge)
  logAndDisplay(
  string.format("[WARN] Post-craft export timeout: %s (%d left)", q.label or "?", q.stillNeed or 0)
  )
+ triggerAlert("post_craft_timeout")
  table.remove(pendingPostCraftExport, i)
  else
  local stock = bridgeStockCountForNeed(bridge, entry)
@@ -1820,7 +2095,7 @@ local function manualConstructionPush(bridge, colony, monitor)
  if not entries or #entries == 0 then
  logAndDisplay("[MANUAL] No NEEDS rows (no work orders or resources list empty).")
  if monitor then
- refreshMonitorBody(monitor)
+ refreshMonitorBody(monitor, bridge)
  end
  return
  end
@@ -1887,7 +2162,7 @@ local function handleMonitorTouch(monitor, bridge, colony)
  currentPage = 1
  end
  end
- refreshMonitorBody(monitor)
+ refreshMonitorBody(monitor, bridge)
  end
  end
 end
@@ -2030,6 +2305,8 @@ end
 local function main()
  local tick = scanInterval
  local nextUiMs = 0
+ local prevUnderAttack = false
+ local prevMeOnline = true
  while true do
  exportBuffer = {}
  processPendingPostCraftDrain(bridge)
@@ -2046,9 +2323,25 @@ local function main()
  for _, ln in ipairs(colonyUiSnapshot.needsLines or {}) do
  table.insert(monitorColonyPrefixLines, ln)
  end
+ local online = confirmConnection(bridge)
+ if colonyUiSnapshot.breakerJustTripped then
+ triggerAlert("get_buildings_breaker")
+ colonyUiSnapshot.breakerJustTripped = false
+ end
+ if colonyUiSnapshot.underAttack and not prevUnderAttack then
+ triggerAlert("raid")
+ end
+ if not online and prevMeOnline then
+ triggerAlert("me_offline")
+ end
+ if online and not prevMeOnline then
+ triggerAlert("me_online")
+ end
+ prevUnderAttack = colonyUiSnapshot.underAttack == true
+ prevMeOnline = online
  mainHandler(bridge, colony)
  processExportBuffer(bridge)
- refreshMonitorBody(monitor)
+ refreshMonitorBody(monitor, bridge)
 
  while tick > 0 do
  local now = os.epoch("utc")
@@ -2062,9 +2355,24 @@ local function main()
  for _, ln in ipairs(colonyUiSnapshot.needsLines or {}) do
  table.insert(monitorColonyPrefixLines, ln)
  end
- refreshMonitorBody(monitor)
+ refreshMonitorBody(monitor, bridge)
  end
  local online = confirmConnection(bridge)
+ if colonyUiSnapshot.breakerJustTripped then
+ triggerAlert("get_buildings_breaker")
+ colonyUiSnapshot.breakerJustTripped = false
+ end
+ if colonyUiSnapshot.underAttack and not prevUnderAttack then
+ triggerAlert("raid")
+ end
+ if not online and prevMeOnline then
+ triggerAlert("me_offline")
+ end
+ if online and not prevMeOnline then
+ triggerAlert("me_online")
+ end
+ prevUnderAttack = colonyUiSnapshot.underAttack == true
+ prevMeOnline = online
  if online then
  tick = tick - 1
  end

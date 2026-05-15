@@ -23,6 +23,28 @@ return {
   showMeCraftingSpinner = true,
   -- Third monitor line (height >= 8): last craft orders, export bar, CPU hint.
   showMeCraftingHudLine = true,
+  -- Optional: prepend [NEEDS] + / - / ~ lines when the material list changes (see docs/ALERTS.md).
+  showConstructionNeedsDiff = false,
+  constructionNeedsDiffMaxLines = 4,
+  pinnedAlertsMaxLines = 3,
+  -- Speaker + redstone alerts (debounced). Off by default.
+  alerts = {
+    enabled = false,
+    minIntervalSec = 10,
+    useSpeaker = true,
+    speakerPeripheralName = nil,
+    useRedstone = false,
+    redstoneSide = "back",
+    redstonePulseTicks = 2,
+    onRaid = true,
+    onMeOffline = true,
+    onMeOnline = false,
+    onMissingPattern = true,
+    onPostCraftTimeout = true,
+    onGetBuildingsBreaker = true,
+    onColonyRequestsCritical = true,
+    onCraftStarted = false,
+  },
   showBuildingsList = false,
   buildingsBreakerMinutes = 30,
   maxLinesPerGroup = 12,
