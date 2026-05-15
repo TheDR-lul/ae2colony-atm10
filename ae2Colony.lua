@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.5.0-atm10"
+local scriptVersion = "0.5.1-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -88,8 +88,14 @@ local showBuildingsList = false -- getBuildings (risky on some MC versions; circ
 local buildingsBreakerMs = 30 * 60 * 1000 -- disable getBuildings after failure
 local buildingsDisabledUntil = 0 -- runtime (epoch ms UTC)
 local maxLinesPerGroup = 12 -- cap lines per category on monitor
+-- Full material list from active work orders (getWorkOrderResources); footer tap runs one-shot export + craft.
+local showConstructionNeedsList = true
+local constructionNeedsMaxWorkOrders = 3
+local constructionNeedsMaxItems = 14
+local showConstructionPushFooter = true
 local monitorGroupOrder = {
  "COLONY",
+ "NEEDS",
  "WARN",
  "ERROR",
  "MISSING",
@@ -161,6 +167,18 @@ local function mergeUserConfig()
  end
  if type(tbl.monitorGroupOrder) == "table" then
   monitorGroupOrder = tbl.monitorGroupOrder
+ end
+ if tbl.showConstructionNeedsList ~= nil then
+  showConstructionNeedsList = tbl.showConstructionNeedsList
+ end
+ if tbl.constructionNeedsMaxWorkOrders ~= nil then
+  constructionNeedsMaxWorkOrders = tonumber(tbl.constructionNeedsMaxWorkOrders) or constructionNeedsMaxWorkOrders
+ end
+ if tbl.constructionNeedsMaxItems ~= nil then
+  constructionNeedsMaxItems = tonumber(tbl.constructionNeedsMaxItems) or constructionNeedsMaxItems
+ end
+ if tbl.showConstructionPushFooter ~= nil then
+  showConstructionPushFooter = tbl.showConstructionPushFooter
  end
  if type(tbl.missingPatternHook) == "table" then
   for mk, mv in pairs(tbl.missingPatternHook) do
@@ -278,10 +296,12 @@ local function syncExportLedger(colonyRequests)
  end
 end
 
-local colonyUiSnapshot = { headerCompact = "", lines = {} }
+local colonyUiSnapshot = { headerCompact = "", lines = {}, needsLines = {}, needsEntries = {} }
 
 local function fetchColonyUiSnapshot(colony, nowMs)
  local lines = {}
+ local needsLines = {}
+ local needsEntries = {}
  local parts = {}
  local function pcallNum(fn)
   local ok, v = pcall(fn)
@@ -365,6 +385,97 @@ local function fetchColonyUiSnapshot(colony, nowMs)
      )
     end
    end
+
+   if showConstructionNeedsList and top > 0 then
+    local needsMap = {}
+    local function mergeNeedRow(woId, r)
+     if type(r) ~= "table" then
+      return
+     end
+     local name = r.item or r.name
+     if type(name) ~= "string" or #name == 0 then
+      return
+     end
+     local fp = r.fingerprint
+     local key = (fp and tostring(fp)) or name
+     local n = tonumber(r.needed) or tonumber(r.count) or 0
+     if n < 1 then
+      n = 1
+     end
+     local st = tostring(r.status or "?")
+     local comps = r.components
+     if type(comps) ~= "table" then
+      comps = {}
+     end
+     local prev = needsMap[key]
+     if prev then
+      prev.needed = prev.needed + n
+      if st == "DONT_HAVE" then
+       prev.status = "DONT_HAVE"
+      end
+     else
+      needsMap[key] = {
+       workOrderId = woId,
+       name = name,
+       fingerprint = fp,
+       displayName = r.displayName,
+       needed = n,
+       status = st,
+       components = comps,
+      }
+     end
+    end
+
+    local woLimit = math.min(constructionNeedsMaxWorkOrders, top)
+    for wi = 1, woLimit do
+     local wrow = list[wi]
+     if wrow and wrow.id ~= nil then
+      local okRes, res = pcall(function()
+       return colony.getWorkOrderResources(wrow.id)
+      end)
+      if okRes and type(res) == "table" then
+       for ri = 1, #res do
+        mergeNeedRow(wrow.id, res[ri])
+       end
+      end
+     end
+    end
+
+    local flat = {}
+    for _, row in pairs(needsMap) do
+     flat[#flat + 1] = row
+    end
+    table.sort(flat, function(a, b)
+     local sa = a.status == "DONT_HAVE" and 0 or 1
+     local sb = b.status == "DONT_HAVE" and 0 or 1
+     if sa ~= sb then
+      return sa < sb
+     end
+     return tostring(a.displayName or a.name) < tostring(b.displayName or b.name)
+    end)
+    local cap = math.max(1, constructionNeedsMaxItems or 14)
+    for i = 1, math.min(#flat, cap) do
+     local row = flat[i]
+     local label = row.displayName or prettifyItemId(row.name)
+     local extra = row.status == "DONT_HAVE" and " !" or ""
+     table.insert(
+      needsLines,
+      string.format("[NEEDS] %s x%d %s%s", label, row.needed, row.status, extra)
+     )
+     needsEntries[#needsEntries + 1] = {
+      workOrderId = row.workOrderId,
+      name = row.name,
+      fingerprint = row.fingerprint,
+      displayName = row.displayName,
+      needed = row.needed,
+      status = row.status,
+      components = row.components,
+     }
+    end
+    if #flat > cap then
+     table.insert(needsLines, string.format("[NEEDS] ... +%d more (see log)", #flat - cap))
+    end
+   end
   end
  end
  if showBuildingsList and nowMs >= buildingsDisabledUntil then
@@ -400,6 +511,8 @@ local function fetchColonyUiSnapshot(colony, nowMs)
  return {
   headerCompact = table.concat(parts, " | "),
   lines = lines,
+  needsLines = needsLines,
+  needsEntries = needsEntries,
  }
 end
 
@@ -507,6 +620,7 @@ end
 
 -- [MONITOR] ----------------------------------------------------------------------------------------------------------
 local monitorLines = {}
+local monitorColonyPrefixLines = {}
 local currentPage, totalPages = 1, 1
 local function setupMonitor()
  local monitor = peripheral.find("monitor")
@@ -521,11 +635,13 @@ local function updateMonitorGrouped(monitor)
  if not monitor then return end
 
  local width, height = monitor.getSize()
- local maxLines = height - 2
+ local reserved = (showConstructionPushFooter and height >= 5) and 1 or 0
+ local maxLines = height - 2 - reserved
  local flatLines = {}
 
  local colorsMap = {
  COLONY = colors.lightBlue,
+ NEEDS = colors.pink,
  WARN = colors.magenta,
  CRAFT = colors.green,
  SENT = colors.lime,
@@ -537,6 +653,7 @@ local function updateMonitorGrouped(monitor)
 
  local groups = {
  ["COLONY"] = {},
+ ["NEEDS"] = {},
  ["WARN"] = {},
  ["ERROR"] = {},
  ["MISSING"] = {},
@@ -546,7 +663,15 @@ local function updateMonitorGrouped(monitor)
  ["INFO"] = {},
  }
 
- for _, line in ipairs(monitorLines) do
+ local combinedLines = {}
+ for _, ln in ipairs(monitorColonyPrefixLines) do
+  table.insert(combinedLines, ln)
+ end
+ for _, ln in ipairs(monitorLines) do
+  table.insert(combinedLines, ln)
+ end
+
+ for _, line in ipairs(combinedLines) do
  local placed = false
  for _, label in ipairs(monitorGroupOrder) do
   if not placed and line:find("%[" .. label .. "%]") then
@@ -597,6 +722,28 @@ local function updateMonitorGrouped(monitor)
  monitor.write(flatLines[i].text:sub(1, width))
  y = y + 1
  end
+end
+
+local function drawConstructionFooter(monitor)
+ if not monitor or not showConstructionPushFooter then
+  return
+ end
+ local w, h = monitor.getSize()
+ if h < 5 then
+  return
+ end
+ monitor.setCursorPos(1, h)
+ monitor.setTextColor(colors.yellow)
+ local txt = ">>> CRAFT+EXPORT (NEEDS) <<<"
+ if #txt > w then
+  txt = "> CRAFT+EXPORT <"
+ end
+ monitor.write(txt .. string.rep(" ", math.max(0, w - #txt)))
+end
+
+local function refreshMonitorBody(monitor)
+ updateMonitorGrouped(monitor)
+ drawConstructionFooter(monitor)
 end
 
 local function logAndDisplay(msg)
@@ -670,7 +817,7 @@ end
 
 -- [UTILS] ------------------------------------------------------------------------------------------------------------
 local exportBuffer = {}
-local function queueExport(fingerprint, count, name, target, ledgerKey, label, idForLog)
+local function queueExport(fingerprint, count, name, target, ledgerKey, label, idForLog, components)
  table.insert(exportBuffer, {
  name = name,
  fingerprint = fingerprint,
@@ -679,6 +826,7 @@ local function queueExport(fingerprint, count, name, target, ledgerKey, label, i
  ledgerKey = ledgerKey,
  label = label,
  idForLog = idForLog or name,
+ components = components or {},
  })
 end
 
@@ -689,7 +837,7 @@ local function processExportBuffer(bridge)
   fingerprint = item.fingerprint,
   name = item.name,
   count = item.count,
-  components = {}
+  components = item.components or {},
  }
  local ok, result = pcall(function()
   if exportChestPeripheral and #exportChestPeripheral > 0 then
@@ -784,17 +932,6 @@ local function updateHeader(monitor, bridge, tick, snapshot)
  monitor.setCursorPos(used + 1, 2)
  monitor.setTextColor(status and colors.green or colors.red)
  monitor.write(string.rep("#", math.min(filled, barW)))
-end
-
-local function handleMonitorTouch(monitor)
- while true do
- local event, side, x, y = os.pullEvent("monitor_touch")
- if side == peripheral.getName(monitor) then
- currentPage = currentPage + 1
- if currentPage > totalPages then currentPage = 1 end
- updateMonitorGrouped(monitor)
- end
- end
 end
 
 local function colonyRequestHandler(colony)
@@ -911,7 +1048,6 @@ local function craftHandler(request, bridgeItem, bridge, craftAmount, itemLabel,
  local craftable = nil
  local payload = {}
  local ok, object = nil, nil
- local fingerprintBridge = nil
  local ri = request.items[1]
  local fingerprintRequest = ri.fingerprint
  local name = ri.name
@@ -930,12 +1066,22 @@ local function craftHandler(request, bridgeItem, bridge, craftAmount, itemLabel,
  if not label or not idLog then
   label, idLog = describeItemLabel(ri, bridgeItem, name)
  end
+ local fingerprintBridge = nil
+ if bridgeItem and bridgeItem.fingerprint then
+  fingerprintBridge = bridgeItem.fingerprint
+ elseif fingerprintRequest then
+  fingerprintBridge = fingerprintRequest
+ end
+ local comps = ri.components
+ if type(comps) ~= "table" then
+  comps = {}
+ end
  if fingerprintBridge then
- craftable = bridge.isCraftable({fingerprint = fingerprintBridge, count = stackSize})
- payload = {fingerprint = fingerprintBridge, count = stackSize}
+ craftable = bridge.isCraftable({fingerprint = fingerprintBridge, count = stackSize, components = comps})
+ payload = {fingerprint = fingerprintBridge, count = stackSize, components = comps}
  elseif name then
- craftable = bridge.isCraftable({name = name, components = {}, count = stackSize})
- payload = {name = name, count = stackSize, components = {}}
+ craftable = bridge.isCraftable({name = name, components = comps, count = stackSize})
+ payload = {name = name, count = stackSize, components = comps}
  end
  if craftable then
  ok, object = pcall(function() return bridge.craftItem(payload) end)
@@ -955,6 +1101,106 @@ local function craftHandler(request, bridgeItem, bridge, craftAmount, itemLabel,
   })
  end
  return object
+end
+
+local function bridgeStockCountForNeed(bridge, entry)
+ local comps = entry.components or {}
+ local ok, it = pcall(function()
+  if entry.fingerprint then
+   return bridge.getItem({
+    fingerprint = entry.fingerprint,
+    name = entry.name,
+    count = 65536,
+    components = comps,
+   })
+  end
+  return bridge.getItem({ name = entry.name, count = 65536, components = comps })
+ end)
+ if ok and it and type(it.count) == "number" then
+  return it.count
+ end
+ return 0
+end
+
+-- One-shot: export what is already in ME for NEEDS rows, then request autocraft for the remainder.
+local function manualConstructionPush(bridge, colony, monitor)
+ if not showConstructionNeedsList then
+  logAndDisplay("[MANUAL] NEEDS list disabled (showConstructionNeedsList=false).")
+  return
+ end
+ local nowMs = os.epoch("utc")
+ local fresh = fetchColonyUiSnapshot(colony, nowMs)
+ colonyUiSnapshot = fresh
+ monitorColonyPrefixLines = {}
+ for _, ln in ipairs(fresh.lines) do
+  table.insert(monitorColonyPrefixLines, ln)
+ end
+ for _, ln in ipairs(fresh.needsLines or {}) do
+  table.insert(monitorColonyPrefixLines, ln)
+ end
+ local entries = fresh.needsEntries
+ if not entries or #entries == 0 then
+  logAndDisplay("[MANUAL] No NEEDS rows (no work orders or resources list empty).")
+  if monitor then
+   refreshMonitorBody(monitor)
+  end
+  return
+ end
+ if not confirmConnection(bridge) then
+  logAndDisplay("[MANUAL] AE2 offline; cannot craft/export.")
+  return
+ end
+ logAndDisplay(string.format("[MANUAL] Footer push: %d material line(s)", #entries))
+ for _, entry in ipairs(entries) do
+  local need = math.max(1, tonumber(entry.needed) or 1)
+  local label = entry.displayName or prettifyItemId(entry.name)
+  local idLog = entry.name
+  local stock = bridgeStockCountForNeed(bridge, entry)
+  local fromStock = math.min(stock, need)
+  if fromStock > 0 then
+   queueExport(
+    entry.fingerprint,
+    fromStock,
+    entry.name,
+    "work-order",
+    nil,
+    label,
+    idLog,
+    entry.components
+   )
+  end
+  local remain = need - fromStock
+  if remain > 0 then
+   local comps = entry.components or {}
+   local fakeRi = {
+    name = entry.name,
+    fingerprint = entry.fingerprint,
+    maxStackSize = 64,
+    components = comps,
+   }
+   local fakeReq = { count = remain, target = "work-order", items = { fakeRi } }
+   craftHandler(fakeReq, nil, bridge, remain, label, idLog)
+  end
+ end
+ processExportBuffer(bridge)
+end
+
+local function handleMonitorTouch(monitor, bridge, colony)
+ while true do
+  local event, side, _, y = os.pullEvent("monitor_touch")
+  if side == peripheral.getName(monitor) then
+   local _, h = monitor.getSize()
+   if showConstructionPushFooter and h >= 5 and y == h then
+    manualConstructionPush(bridge, colony, monitor)
+   else
+    currentPage = currentPage + 1
+    if currentPage > totalPages then
+     currentPage = 1
+    end
+   end
+   refreshMonitorBody(monitor)
+  end
+ end
 end
 
 -- [MAIN HANDLER] -----------------------------------------------------------------------------------------------------
@@ -1097,24 +1343,35 @@ local function main()
  while true do
  exportBuffer = {}
  monitorLines = {}
+ monitorColonyPrefixLines = {}
  local nowScan = os.epoch("utc")
  if nowScan >= nextUiMs then
  colonyUiSnapshot = fetchColonyUiSnapshot(colony, nowScan)
  nextUiMs = nowScan + (colonyUiInterval * 1000)
  end
  for _, ln in ipairs(colonyUiSnapshot.lines) do
- table.insert(monitorLines, ln)
+  table.insert(monitorColonyPrefixLines, ln)
+ end
+ for _, ln in ipairs(colonyUiSnapshot.needsLines or {}) do
+  table.insert(monitorColonyPrefixLines, ln)
  end
  mainHandler(bridge, colony)
  processExportBuffer(bridge)
- updateMonitorGrouped(monitor)
+ refreshMonitorBody(monitor)
 
  while tick > 0 do
  local now = os.epoch("utc")
  if now >= nextUiMs then
  colonyUiSnapshot = fetchColonyUiSnapshot(colony, now)
  nextUiMs = now + (colonyUiInterval * 1000)
- updateMonitorGrouped(monitor)
+ monitorColonyPrefixLines = {}
+ for _, ln in ipairs(colonyUiSnapshot.lines) do
+  table.insert(monitorColonyPrefixLines, ln)
+ end
+ for _, ln in ipairs(colonyUiSnapshot.needsLines or {}) do
+  table.insert(monitorColonyPrefixLines, ln)
+ end
+ refreshMonitorBody(monitor)
  end
  local online = confirmConnection(bridge)
  if online then
@@ -1129,5 +1386,5 @@ end
 
 parallel.waitForAll(
  main,
- function() handleMonitorTouch(monitor) end
+ function() handleMonitorTouch(monitor, bridge, colony) end
 )

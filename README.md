@@ -23,6 +23,11 @@ ae2Colony
 
 (Optional) Save as `startup.lua` with `shell.run("ae2Colony")` for autostart.
 
+### v0.5.1 highlights
+
+- **`== NEEDS ==` window:** merged construction materials from active work orders (`getWorkOrderResources`).
+- **Footer `CRAFT+EXPORT`:** tap bottom line (monitor ≥5 lines tall) to export in-stock items and queue autocraft for the rest; re-fetches colony data on tap.
+
 ### v0.5.0 highlights
 
 - Colony stats + work-order summary on the monitor (no exact block-% — see docs).
