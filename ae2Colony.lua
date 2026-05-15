@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.4.4-atm10"
+local scriptVersion = "0.4.5-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -54,6 +54,11 @@ local exportSide = "top"
 -- Optional: export into a wired-modem chest/inventory by its ComputerCraft peripheral name (run the `peripherals` program).
 -- Example: "minecraft:chest_0". When set, this overrides `exportSide`.
 local exportChestPeripheral = nil
+
+-- The script does NOT scan the export chest or colonist inventories. It uses MineColonies getRequests()
+-- remaining counts and AE2 storage (getItems). Avoiding "double export" relies on the colony updating
+-- requests once logistics consider them satisfied (usually after delivery to the hut/warehouse, not
+-- only when items sit in your bridge chest buffer).
 local craftMaxStack = false -- Autocraft exact or a stack. ie 3 logs vs 64 logs.
 local scanInterval = 30 -- Probably shouldn't go much lower than 20s...
 local doLog = false -- Leave false unless you have issues. Kinda spammy!
