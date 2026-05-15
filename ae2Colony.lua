@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.5.15-atm10"
+local scriptVersion = "0.5.16-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -154,11 +154,16 @@ local recentCraftOrders = {}
 -- Pinned monitor rows (rebuilt before each body draw).
 local pinnedDisplayLines = {}
 -- NEEDS diff: previous snapshot map key -> { needed, status, label }
--- Bottom-right mute chip (monitor touch). Only drawn when alerts.enabled.
+local lastNeedsForDiff = nil
+local triggerAlert
+-- Footer: [TEST] + mode chip (mute when alerts on, or [A:ON]/[A:OFF] toggle when off).
 local showAlertsMuteButton = true
 local alertsMuted = false
 local alertsMutedFile = "ae2colony_alerts_muted.txt"
-local ALERT_MUTE_CORNER_CHARS = 10
+-- If this file exists, it overrides alerts.enabled after config (true/false).
+local alertsMonitorOverrideFile = "ae2colony_alerts_monitor_enabled.txt"
+local FOOTER_ALERT_TEST_CHARS = 6
+local FOOTER_ALERT_MODE_CHARS = 8
 
 local function mergeUserConfig()
  if not fs.exists("ae2colony_config.lua") then
@@ -319,6 +324,34 @@ local function saveAlertsMuted()
  local f = fs.open(alertsMutedFile, "w")
  if f then
  f.write(alertsMuted and "true" or "false")
+ f.close()
+ end
+end
+
+local function loadAlertsMonitorOverride()
+ if not fs.exists(alertsMonitorOverrideFile) then
+ return
+ end
+ local f = fs.open(alertsMonitorOverrideFile, "r")
+ if not f then
+ return
+ end
+ local s = f.readAll()
+ f.close()
+ if type(s) ~= "string" then
+ return
+ end
+ if s:find("true", 1, true) then
+ alerts.enabled = true
+ elseif s:find("false", 1, true) then
+ alerts.enabled = false
+ end
+end
+
+local function saveAlertsMonitorOverride(on)
+ local f = fs.open(alertsMonitorOverrideFile, "w")
+ if f then
+ f.write(on and "true" or "false")
  f.close()
  end
 end
@@ -1019,6 +1052,7 @@ local whitelistItemName = {
 
 mergeUserConfig()
 loadAlertsMuted()
+loadAlertsMonitorOverride()
 
 local alertKindToConfig = {
  raid = "onRaid",
@@ -1077,6 +1111,23 @@ local function playSpeakerPattern(pattern)
  end)
  os.sleep(0.08)
  end
+end
+
+local function playSpeakerTestBeep()
+ local sp = getSpeakerPeripheral()
+ if not sp then
+ print("[ae2Colony] Speaker test: no speaker (attach speaker + wired modem).")
+ return false
+ end
+ local ok = pcall(function()
+ sp.playNote("harp", 2, 15)
+ end)
+ if ok then
+ print("[ae2Colony] Speaker test: beep OK.")
+ else
+ print("[ae2Colony] Speaker test: playNote failed.")
+ end
+ return ok
 end
 
 local function pulseRedstoneAlert()
@@ -1233,7 +1284,7 @@ local function updateMonitorGrouped(monitor)
 
  local width, height = monitor.getSize()
  local footerReserved = (height >= 5)
- and (showConstructionPushFooter or (showAlertsMuteButton and alerts.enabled))
+ and (showConstructionPushFooter or showAlertsMuteButton)
  and 1
  or 0
  local reserved = footerReserved
@@ -1440,6 +1491,33 @@ local function rebuildPinnedLines(bridge, snap)
  end
 end
 
+local function footerAlertBarLayout(w)
+ if not showAlertsMuteButton or w < 8 then
+ return nil
+ end
+ local testW = math.min(FOOTER_ALERT_TEST_CHARS, w - 1)
+ local xTest = w - testW + 1
+ local modeW = math.min(FOOTER_ALERT_MODE_CHARS, math.max(0, xTest - 2))
+ local xMode = nil
+ local craftMax = xTest - 1
+ if modeW >= 1 then
+ xMode = xTest - modeW
+ craftMax = xMode - 1
+ if craftMax < 0 then
+ craftMax = 0
+ modeW = 0
+ xMode = nil
+ end
+ end
+ return {
+ xTest = xTest,
+ xMode = xMode,
+ testW = testW,
+ modeW = modeW,
+ craftMax = craftMax,
+ }
+end
+
 local function drawConstructionFooter(monitor)
  if not monitor then
  return
@@ -1448,24 +1526,19 @@ local function drawConstructionFooter(monitor)
  if h < 5 then
  return
  end
- if not showConstructionPushFooter and not (showAlertsMuteButton and alerts.enabled) then
+ local lay = footerAlertBarLayout(w)
+ if not showConstructionPushFooter and not lay then
  return
  end
- local muteW = 0
- local xMute = nil
- if showAlertsMuteButton and alerts.enabled then
- muteW = math.min(ALERT_MUTE_CORNER_CHARS, w)
- if muteW >= 2 then
- xMute = w - muteW + 1
+ if not lay then
+ lay = { craftMax = w, xTest = nil, xMode = nil, modeW = 0, testW = 0 }
  end
+ local craftMax = lay.craftMax or 0
+ if craftMax < 0 then
+ craftMax = 0
  end
- local muteLabel = alertsMuted and "[MUTED!]" or "[sound]"
- if muteW > 0 then
- muteLabel = string.sub(muteLabel .. string.rep(" ", muteW), 1, muteW)
- end
- local craftMax = xMute and (xMute - 1) or w
  monitor.setCursorPos(1, h)
- if showConstructionPushFooter then
+ if showConstructionPushFooter and craftMax > 0 then
  local txt = ">>> CRAFT+EXPORT (NEEDS) <<<"
  if #txt > craftMax then
  txt = "> CRAFT+EXPORT <"
@@ -1479,16 +1552,31 @@ local function drawConstructionFooter(monitor)
  monitor.setTextColor(colors.black)
  monitor.write(string.rep(" ", craftMax - #txt))
  end
- else
- if craftMax > 0 then
+ elseif craftMax > 0 then
  monitor.setTextColor(colors.black)
  monitor.write(string.rep(" ", craftMax))
  end
+ if lay.modeW and lay.modeW > 0 and lay.xMode then
+ local modeLabel
+ if alerts.enabled then
+ modeLabel = alertsMuted and "[MUTED!]" or "[SND:ON]"
+ else
+ modeLabel = "[A:OFF]"
  end
- if xMute then
- monitor.setCursorPos(xMute, h)
+ modeLabel = string.sub(modeLabel .. string.rep(" ", lay.modeW), 1, lay.modeW)
+ monitor.setCursorPos(lay.xMode, h)
+ if alerts.enabled then
  monitor.setTextColor(alertsMuted and colors.magenta or colors.lightGray)
- monitor.write(muteLabel)
+ else
+ monitor.setTextColor(colors.gray)
+ end
+ monitor.write(modeLabel)
+ end
+ if lay.xTest then
+ local testLabel = string.sub("[TEST]" .. string.rep(" ", lay.testW), 1, lay.testW)
+ monitor.setCursorPos(lay.xTest, h)
+ monitor.setTextColor(colors.orange)
+ monitor.write(testLabel)
  end
 end
 
@@ -2227,19 +2315,37 @@ local function handleMonitorTouch(monitor, bridge, colony)
  local event, side, x, y = os.pullEvent("monitor_touch")
  if side == peripheral.getName(monitor) then
  local w, h = monitor.getSize()
- local muteTap = false
- if h >= 5 and y == h and showAlertsMuteButton and alerts.enabled then
- local muteW = math.min(ALERT_MUTE_CORNER_CHARS, w)
- local xMute = w - muteW + 1
- if x >= xMute then
- muteTap = true
- end
- end
- if h >= 5 and y == h and muteTap then
- alertsMuted = not alertsMuted
+ if h >= 5 and y == h then
+ local lay = footerAlertBarLayout(w)
+ local hitTest = lay and lay.xTest and x >= lay.xTest
+ local hitMode = lay and lay.modeW and lay.modeW > 0 and lay.xMode and x >= lay.xMode and x < lay.xTest
+ if hitTest then
+ playSpeakerTestBeep()
+ elseif hitMode then
+ if alerts.enabled then
+ if alertsMuted then
+ alerts.enabled = false
+ alertsMuted = false
+ saveAlertsMonitorOverride(false)
  saveAlertsMuted()
- elseif h >= 5 and y == h and showConstructionPushFooter then
+ else
+ alertsMuted = true
+ saveAlertsMuted()
+ end
+ else
+ alerts.enabled = true
+ alertsMuted = false
+ saveAlertsMonitorOverride(true)
+ saveAlertsMuted()
+ end
+ elseif showConstructionPushFooter and (not lay or x <= (lay.craftMax or w)) then
  manualConstructionPush(bridge, colony, monitor)
+ else
+ currentPage = currentPage + 1
+ if currentPage > totalPages then
+ currentPage = 1
+ end
+ end
  else
  currentPage = currentPage + 1
  if currentPage > totalPages then
@@ -2387,12 +2493,13 @@ else
 end
 if alerts.enabled then
  if alertsMuted then
- print("[ae2Colony] Alerts: ON (muted). Bottom-right: tap [sound] to hear alerts again.")
+ print("[ae2Colony] Alerts: ON (muted). Last line: tap [MUTED!] to turn alerts off, [TEST] for speaker beep.")
  else
- print("[ae2Colony] Alerts: ON — attach a CC speaker (wired). Bottom-right: tap to mute.")
+ print("[ae2Colony] Alerts: ON — use a wired CC speaker. Last line: [TEST] = beep, tap [SND:ON] to mute.")
  end
 else
- print("[ae2Colony] Alerts: OFF — set alerts.enabled=true in ae2colony_config.lua + speaker for sounds.")
+ print("[ae2Colony] Alerts: OFF — set alerts.enabled in ae2colony_config.lua or tap [A:OFF] on the last line. [TEST] = speaker beep.")
+ print("[ae2Colony] Optional file override (true/false): ae2colony_alerts_monitor_enabled.txt")
 end
 
 local function main()
