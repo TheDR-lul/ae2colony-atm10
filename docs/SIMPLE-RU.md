@@ -16,22 +16,22 @@
 
 ---
 
-## Шаг 2. Куда выгружать (одна настройка)
+## Шаг 2. Куда выгружать
 
-Открой `ae2Colony.lua` **самый верх**, блок **USER CONFIG**.
+**Вариант A — править сам `ae2Colony.lua`** (как раньше): вверху файла `exportSide` / `exportChestPeripheral`.
 
-### Вариант А — сундук стоит **на** мосту (сверху)
+**Вариант B (v0.5+):** положи рядом файл **`ae2colony_config.lua`** — скопируй с GitHub [`ae2colony_config.example.lua`](https://github.com/TheDR-lul/ae2colony-atm10/blob/main/ae2colony_config.example.lua) и переименуй. В терминале компьютера появится строка `Merged ae2colony_config.lua`.
 
-Оставь так (это **уже по умолчанию** в этой версии):
+### Сундук на мосту (по умолчанию)
 
 ```lua
-local exportSide = "top"
-local exportChestPeripheral = nil
+exportSide = "top"
+exportChestPeripheral = nil
 ```
 
-Слово **`top`** значит: «сундук **над** блоком **ME Bridge**».
+(в **config** это поля таблицы `return { ... }`, не `local`)
 
-### Вариант Б — сундук сбоку от моста
+### Сундук сбоку от моста
 
 Поставь сундук **вплотную** к мосту с нужной стороны и поменяй на одно из:
 
@@ -39,25 +39,40 @@ local exportChestPeripheral = nil
 
 (Это стороны **относительно самого моста**, не компьютера.)
 
-### Вариант В — сундук далеко, но на **проводном модеме**
+### Сундук далеко, но на **проводном модеме**
 
 1. В компьютере запусти программу **`peripherals`** и найди строку с твоим сундуком — там будет **имя**, типа `minecraft:chest_3`.
-2. В скрипте:
+2. Укажи имя в **`ae2Colony.lua`** (как раньше):
 
 ```lua
-local exportChestPeripheral = "minecraft:chest_3"  -- подставь СВОЁ имя
+local exportChestPeripheral = "minecraft:chest_3"  -- your peripheral name
+```
+
+или в **`ae2colony_config.lua`**:
+
+```lua
+return {
+  exportChestPeripheral = "minecraft:chest_3",
+}
 ```
 
 Тогда **`exportSide` игнорируется** — выгрузка идёт прямо в этот сундук по сети модемов.
 
 ---
 
-## Шаг 3. Запуск (одна «кнопка»)
+## Шаг 3. Запуск (две ссылки)
 
-В компьютере:
+**Свежая версия (монитор + колония + config):**
 
 ```text
 wget run https://raw.githubusercontent.com/TheDR-lul/ae2colony-atm10/main/ae2Colony.lua
+ae2Colony
+```
+
+**Замороженная v0.4.6** (если боишься регрессий — без нового UI колонии):
+
+```text
+wget run https://raw.githubusercontent.com/TheDR-lul/ae2colony-atm10/main/releases/ae2Colony-v0.4.6.lua
 ae2Colony
 ```
 
@@ -73,6 +88,8 @@ shell.run("ae2Colony")
 
 ## Что ты увидишь, если всё ок
 
+- **Вторая строка монитора (v0.5+):** коротко колония — сайты стройки, жители, счастье; справа полоска до следующего опроса AE2.
+- Блок **`COLONY`:** активные заказы стройки (без точного % блоков — такого API нет). Подробнее: [MONITOR-AND-COLONY-UI.md](https://github.com/TheDR-lul/ae2colony-atm10/blob/main/docs/MONITOR-AND-COLONY-UI.md)
 - На мониторе: **`[SENT]`** — предметы **улетели в сундук**.
 - **`[CRAFT]`** — в AE2 **заказан крафт**, потом обычно на следующем круге пойдёт **`[SENT]`**.
 - **`[MISSING]`** — в AE2 **нет шаблона** на этот предмет (надо один раз добавить рецепт в терминал шаблонов). Скрипт **не умеет сам нарисовать** шаблон — это ограничение модов, не «сломанный сундук».

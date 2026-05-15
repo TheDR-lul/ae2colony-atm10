@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.5.0-atm10"
+local scriptVersion = "0.4.6-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -27,9 +27,7 @@ end
 --[[-------------------------------------------------------------------------------------------------------------------
 author: toastonrye
 https://github.com/toastonrye/ae2Colony/blob/main/README.md
-Public install latest (CC:Tweaked): wget run https://raw.githubusercontent.com/TheDR-lul/ae2colony-atm10/main/ae2Colony.lua
-Frozen stable v0.4.6: wget run https://raw.githubusercontent.com/TheDR-lul/ae2colony-atm10/main/releases/ae2Colony-v0.4.6.lua
-Optional config (same folder as script): ae2colony_config.lua — see ae2colony_config.example.lua on GitHub.
+Public install (CC:Tweaked): wget run https://raw.githubusercontent.com/TheDR-lul/ae2colony-atm10/main/ae2Colony.lua
 
 Setup
 Please see the Github for more detailed information!
@@ -80,101 +78,6 @@ local missingPatternHook = {
  logFile = "ae2colony_missing_patterns.jsonl", -- always written when enabled (in addition to HTTP when httpUrl set)
 }
 local missingHookLastPostMs = {}
-
--- Colony UI (MineColonies via colony_integrator). No exact block-% from API; see docs/MONITOR-AND-COLONY-UI.md
-local colonyUiInterval = 5 -- seconds between heavy colony API refreshes (header uses cached snapshot every tick)
-local showConstructionDetail = true -- getWorkOrders summary (top 3)
-local showBuildingsList = false -- getBuildings (risky on some MC versions; circuit breaker on error)
-local buildingsBreakerMs = 30 * 60 * 1000 -- disable getBuildings after failure
-local buildingsDisabledUntil = 0 -- runtime (epoch ms UTC)
-local maxLinesPerGroup = 12 -- cap lines per category on monitor
-local monitorGroupOrder = {
- "COLONY",
- "WARN",
- "ERROR",
- "MISSING",
- "CRAFT",
- "SENT",
- "MANUAL",
- "INFO",
-}
-
-local function mergeUserConfig()
- if not fs.exists("ae2colony_config.lua") then
-  return
- end
- local fn, err = loadfile("ae2colony_config.lua")
- if not fn then
-  return
- end
- local ok, tbl = pcall(fn)
- if not ok or type(tbl) ~= "table" then
-  return
- end
- if tbl.exportSide ~= nil then
-  exportSide = tbl.exportSide
- end
- if tbl.exportChestPeripheral ~= nil then
-  exportChestPeripheral = tbl.exportChestPeripheral
- end
- if tbl.exportLedgerFile ~= nil then
-  exportLedgerFile = tbl.exportLedgerFile
- end
- if tbl.craftMaxStack ~= nil then
-  craftMaxStack = tbl.craftMaxStack
- end
- if tbl.scanInterval ~= nil then
-  scanInterval = tbl.scanInterval
- end
- if tbl.doLog ~= nil then
-  doLog = tbl.doLog
- end
- if tbl.doLogExtra ~= nil then
-  doLogExtra = tbl.doLogExtra
- end
- if tbl.logFolder ~= nil then
-  logFolder = tbl.logFolder
- end
- if tbl.maxLogs ~= nil then
-  maxLogs = tbl.maxLogs
- end
- if tbl.maxLogSize ~= nil then
-  maxLogSize = tbl.maxLogSize
- end
- if tbl.colonyUiInterval ~= nil then
-  colonyUiInterval = tonumber(tbl.colonyUiInterval) or colonyUiInterval
- end
- if tbl.showConstructionDetail ~= nil then
-  showConstructionDetail = tbl.showConstructionDetail
- end
- if tbl.showBuildingsList ~= nil then
-  showBuildingsList = tbl.showBuildingsList
- end
- if tbl.buildingsBreakerMinutes ~= nil then
-  local m = tonumber(tbl.buildingsBreakerMinutes)
-  if m and m > 0 then
-   buildingsBreakerMs = m * 60 * 1000
-  end
- end
- if tbl.maxLinesPerGroup ~= nil then
-  maxLinesPerGroup = tonumber(tbl.maxLinesPerGroup) or maxLinesPerGroup
- end
- if type(tbl.monitorGroupOrder) == "table" then
-  monitorGroupOrder = tbl.monitorGroupOrder
- end
- if type(tbl.missingPatternHook) == "table" then
-  for mk, mv in pairs(tbl.missingPatternHook) do
-   missingPatternHook[mk] = mv
-  end
- end
- if type(tbl.blacklistedTags) == "table" then
-  blacklistedTags = tbl.blacklistedTags
- end
- if type(tbl.whitelistItemName) == "table" then
-  whitelistItemName = tbl.whitelistItemName
- end
- print("[ae2Colony] Merged ae2colony_config.lua")
-end
 
 local function prettifyItemId(id)
  if type(id) ~= "string" then
@@ -278,132 +181,7 @@ local function syncExportLedger(colonyRequests)
  end
 end
 
-local colonyUiSnapshot = { headerCompact = "", lines = {} }
-
-local function fetchColonyUiSnapshot(colony, nowMs)
- local lines = {}
- local parts = {}
- local function pcallNum(fn)
-  local ok, v = pcall(fn)
-  if ok and v ~= nil then
-   return true, v
-  end
-  return false, nil
- end
- local okN, name = pcall(function()
-  return colony.getColonyName()
- end)
- if okN and name then
-  table.insert(parts, tostring(name))
- end
- local okS, sites = pcall(function()
-  return colony.amountOfConstructionSites()
- end)
- if okS then
-  table.insert(parts, "Sites:" .. tostring(sites))
- end
- local okC, cur = pcall(function()
-  return colony.amountOfCitizens()
- end)
- local okM, maxc = pcall(function()
-  return colony.maxOfCitizens()
- end)
- if okC then
-  if okM then
-   table.insert(parts, string.format("Cit:%s/%s", tostring(cur), tostring(maxc)))
-  else
-   table.insert(parts, "Cit:" .. tostring(cur))
-  end
- end
- local okH, happy = pcall(function()
-  return colony.getHappiness()
- end)
- if okH and happy ~= nil then
-  table.insert(parts, "Hap:" .. string.format("%.0f", happy))
- end
- local okA, attack = pcall(function()
-  return colony.isUnderAttack()
- end)
- if okA and attack then
-  table.insert(lines, "[WARN] Colony UNDER ATTACK")
- end
- if showConstructionDetail then
-  local okW, wo = pcall(function()
-   return colony.getWorkOrders()
-  end)
-  if okW and type(wo) == "table" then
-   local list = {}
-   for i = 1, #wo do
-    list[#list + 1] = wo[i]
-   end
-   table.sort(list, function(a, b)
-    return (tonumber(a.priority) or 0) > (tonumber(b.priority) or 0)
-   end)
-   local top = math.min(3, #list)
-   for i = 1, top do
-    local w = list[i]
-    local bn = w.buildingName or w.type or "?"
-    local tl = w.targetLevel
-    local tlStr = tl ~= nil and tostring(tl) or "?"
-    local cl = w.isClaimed and "claimed" or "open"
-    local pri = w.priority
-    table.insert(
-     lines,
-     string.format("[COLONY] WO %s ->Lv%s %s pri=%s", tostring(bn), tlStr, cl, tostring(pri))
-    )
-   end
-   if top > 0 and list[1] and list[1].id ~= nil then
-    local okR, res = pcall(function()
-     return colony.getWorkOrderResources(list[1].id)
-    end)
-    if okR and type(res) == "table" and #res > 0 then
-     local r = res[1]
-     local rn = r.displayName or r.item or "?"
-     table.insert(
-      lines,
-      string.format("[COLONY] Top need: %s x%s (%s)", tostring(rn), tostring(r.needed or "?"), tostring(r.status or "?"))
-     )
-    end
-   end
-  end
- end
- if showBuildingsList and nowMs >= buildingsDisabledUntil then
-  local okB, buildings = pcall(function()
-   return colony.getBuildings()
-  end)
-  if okB and type(buildings) == "table" then
-   local shown = 0
-   for i = 1, #buildings do
-    local b = buildings[i]
-    if b and (b.built == false or b.isWorkingOn) then
-     local loc = b.location or {}
-     table.insert(
-      lines,
-      string.format(
-       "[COLONY] Site:%s @%s,%s",
-       tostring(b.name or "?"),
-       tostring(loc.x or "?"),
-       tostring(loc.z or "?")
-      )
-     )
-     shown = shown + 1
-     if shown >= 2 then
-      break
-     end
-    end
-   end
-  else
-   buildingsDisabledUntil = nowMs + buildingsBreakerMs
-   table.insert(lines, "[WARN] getBuildings disabled (API error; see docs)")
-  end
- end
- return {
-  headerCompact = table.concat(parts, " | "),
-  lines = lines,
- }
-end
-
--- [BLACKLIST & WHITELIST LOOKUPS] ----------------------------------------------------------------------------------------------------
+-- [BLACKLIST & WHITELIST LOOKUPS] --------------------------------------------------------------------------------------------------------
 -- blacklistedTags: all items matching the given tags are skipped, they do not export.
 local blacklistedTags = {
  ["c:foods"] = true, -- I've noticed not all foods use tags, like at all! :(
@@ -420,8 +198,6 @@ local whitelistItemName = {
  ["minecraft:potato"] = true,
  ["minecolonies:apple_pie"] = true,
 }
-
-mergeUserConfig()
 
 -- [TOOLS & ARMOUR LOOKUPS]----------------------------------------------------------------------------------------------------
 -- QUESTION: It maybe better to just have colonists make tools and armour?
@@ -525,8 +301,6 @@ local function updateMonitorGrouped(monitor)
  local flatLines = {}
 
  local colorsMap = {
- COLONY = colors.lightBlue,
- WARN = colors.magenta,
  CRAFT = colors.green,
  SENT = colors.lime,
  ERROR = colors.red,
@@ -536,8 +310,6 @@ local function updateMonitorGrouped(monitor)
  }
 
  local groups = {
- ["COLONY"] = {},
- ["WARN"] = {},
  ["ERROR"] = {},
  ["MISSING"] = {},
  ["CRAFT"] = {},
@@ -547,35 +319,19 @@ local function updateMonitorGrouped(monitor)
  }
 
  for _, line in ipairs(monitorLines) do
- local placed = false
- for _, label in ipairs(monitorGroupOrder) do
-  if not placed and line:find("%[" .. label .. "%]") then
-   table.insert(groups[label], line)
-   placed = true
-   break
-  end
+ for label in pairs(groups) do
+ if line:find("%[" .. label .. "%]") then
+ table.insert(groups[label], line)
+ break
  end
- if not placed then
-  table.insert(groups["INFO"], line)
  end
  end
 
- for _, label in ipairs(monitorGroupOrder) do
- local entries = groups[label]
- if entries and #entries > 0 then
+ for label, entries in pairs(groups) do
+ if #entries > 0 then
  table.insert(flatLines, {text = "== " .. label .. " ==", color = colors.white})
- local cap = maxLinesPerGroup or 12
- for j = 1, math.min(#entries, cap) do
- table.insert(flatLines, {text = entries[j], color = colorsMap[label] or colors.white})
- end
- if #entries > cap then
-  table.insert(
-   flatLines,
-   {
-    text = string.format("... +%d more", #entries - cap),
-    color = colors.gray,
-   }
-  )
+ for _, entry in ipairs(entries) do
+ table.insert(flatLines, {text = entry, color = colorsMap[label] or colors.white})
  end
  end
  end
@@ -741,7 +497,7 @@ local function bridgeDataHandler(bridge)
  return indexFingerprint
 end
 
-local function updateHeader(monitor, bridge, tick, snapshot)
+local function updateHeader(monitor, bridge, tick)
  if not monitor then return end
 
  local width, _ = monitor.getSize()
@@ -764,26 +520,14 @@ local function updateHeader(monitor, bridge, tick, snapshot)
  monitor.setTextColor(status and colors.lime or colors.red)
  monitor.write(statusText)
 
- local left = ""
- if snapshot and type(snapshot.headerCompact) == "string" then
-  left = snapshot.headerCompact
- end
- if #left > math.floor(width * 0.58) then
-  left = left:sub(1, math.max(0, math.floor(width * 0.58) - 1))
- end
  monitor.setCursorPos(1, 2)
- monitor.setTextColor(colors.lightGray)
- monitor.write(left)
- local used = #left
- if used < width then
-  monitor.setTextColor(colors.black)
-  monitor.write(string.rep(" ", width - used))
- end
- local barW = math.max(1, width - used)
- local filled = math.floor((tick / scanInterval) * barW)
- monitor.setCursorPos(used + 1, 2)
+ monitor.setTextColor(colors.gray)
+ monitor.write(string.rep("-", width))
+
+ local filled = math.floor((tick / scanInterval) * width)
+ monitor.setCursorPos(1, 2)
  monitor.setTextColor(status and colors.green or colors.red)
- monitor.write(string.rep("#", math.min(filled, barW)))
+ monitor.write(string.rep("#", filled))
 end
 
 local function handleMonitorTouch(monitor)
@@ -1093,34 +837,19 @@ end
 
 local function main()
  local tick = scanInterval
- local nextUiMs = 0
  while true do
  exportBuffer = {}
  monitorLines = {}
- local nowScan = os.epoch("utc")
- if nowScan >= nextUiMs then
- colonyUiSnapshot = fetchColonyUiSnapshot(colony, nowScan)
- nextUiMs = nowScan + (colonyUiInterval * 1000)
- end
- for _, ln in ipairs(colonyUiSnapshot.lines) do
- table.insert(monitorLines, ln)
- end
  mainHandler(bridge, colony)
  processExportBuffer(bridge)
  updateMonitorGrouped(monitor)
 
  while tick > 0 do
- local now = os.epoch("utc")
- if now >= nextUiMs then
- colonyUiSnapshot = fetchColonyUiSnapshot(colony, now)
- nextUiMs = now + (colonyUiInterval * 1000)
- updateMonitorGrouped(monitor)
- end
  local online = confirmConnection(bridge)
  if online then
  tick = tick - 1
  end
- updateHeader(monitor, bridge, tick, colonyUiSnapshot)
+ updateHeader(monitor, bridge, tick)
  os.sleep(1)
  end
  tick = scanInterval

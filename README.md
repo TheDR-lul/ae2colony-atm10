@@ -4,14 +4,16 @@ Public fork of [toastonrye/ae2Colony](https://github.com/toastonrye/ae2Colony) f
 
 Upstream is MIT-licensed; see [LICENSE](LICENSE).
 
-**Russian “press the button” setup (chest on ME bridge, colony build):** [docs/SIMPLE-RU.md](docs/SIMPLE-RU.md)  
-**v0.4.6:** export ledger (no double-pull from ME while colony count lags), human-readable names on monitor, partial-export craft uses remainder only.
+**Russian “press the button” setup:** [docs/SIMPLE-RU.md](docs/SIMPLE-RU.md)  
+**Monitor + colony UI + config (v0.5.0+):** [docs/MONITOR-AND-COLONY-UI.md](docs/MONITOR-AND-COLONY-UI.md)  
+**Optional config template:** [ae2colony_config.example.lua](ae2colony_config.example.lua) (copy to `ae2colony_config.lua` on the computer)
 
-## Install (in-game computer)
+## Install tracks
 
-```text
-wget run https://raw.githubusercontent.com/TheDR-lul/ae2colony-atm10/main/ae2Colony.lua
-```
+| Track | Command |
+|--------|---------|
+| **Latest** (`main`, recommended for new features) | `wget run https://raw.githubusercontent.com/TheDR-lul/ae2colony-atm10/main/ae2Colony.lua` |
+| **Frozen v0.4.6** (no colony UI strip / no external config merge) | `wget run https://raw.githubusercontent.com/TheDR-lul/ae2colony-atm10/main/releases/ae2Colony-v0.4.6.lua` |
 
 Then run:
 
@@ -21,18 +23,22 @@ ae2Colony
 
 (Optional) Save as `startup.lua` with `shell.run("ae2Colony")` for autostart.
 
+### v0.5.0 highlights
+
+- Colony stats + work-order summary on the monitor (no exact block-% — see docs).
+- Optional `ae2colony_config.lua` overrides without editing the main script.
+- `getBuildings` optional, off by default, with circuit breaker on API errors.
+- Group order + per-group line caps on the monitor.
+
+v**0.4.6** (stable file): export ledger, readable item labels, partial-export craft remainder, default ME export `top`.
+
 ## Missing AE patterns (ATM10 / Extended AE)
 
-ComputerCraft cannot encode AE2 patterns or push them into an **Extended AE Assembly Matrix** by itself. v**0.4.3** can **log + HTTP POST** each `[MISSING]` item so you can wire your own server-side follow-up:
-
-- Read [`docs/AUTO_PATTERN_ATM10.md`](docs/AUTO_PATTERN_ATM10.md)
-- Optional receiver: [`pattern-hook/README.md`](pattern-hook/README.md)
-
-Enable in `ae2Colony.lua` → table `missingPatternHook` (`enabled = true`, `httpUrl`, optional `httpSecret`, `logFile`).
+ComputerCraft cannot encode AE2 patterns or push them into an **Extended AE Assembly Matrix** by itself. The script can **log + HTTP POST** each `[MISSING]` item — see [docs/AUTO_PATTERN_ATM10.md](docs/AUTO_PATTERN_ATM10.md) and [pattern-hook/README.md](pattern-hook/README.md).
 
 ## Requirements
 
-- CC: Tweaked, Advanced Peripherals (with `me_bridge` + `colony_integrator`), AE2, MineColonies — see upstream README for setup details.
+- CC: Tweaked, Advanced Peripherals (`me_bridge` + `colony_integrator`), AE2, MineColonies — see upstream README for setup details.
 
 ## Note
 
