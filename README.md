@@ -23,6 +23,10 @@ ae2Colony
 
 (Optional) Save as `startup.lua` with `shell.run("ae2Colony")` for autostart.
 
+### v0.5.6 highlights
+
+- **NEEDS quantities:** prefer MineColonies-style **`amount` − `amountAvailable`** (delivered vs required) when both exist, so monitor matches the build GUI deficit; suffix **`(avail/total)`** on lines. Footer push skips `NOT_NEEDED` and zero-need rows; craft/export uses the same **needed** value.
+
 ### v0.5.5 highlights
 
 - **NEEDS vs Top need:** one merged list; `Top need` = first row after sort. Duplicate WO+builder counts use **`max`**; **`NOT_NEEDED`** hidden by default.

@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.5.5-atm10"
+local scriptVersion = "0.5.6-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -373,22 +373,72 @@ local function quantityFromNeedRow(r)
  if type(r) ~= "table" then
   return 1
  end
- local need = r.needed
- local n = nil
- if type(need) == "number" then
-  n = need
- elseif type(need) == "string" then
-  n = tonumber(need)
- elseif type(need) == "table" then
-  n = tonumber(need.count or need.amount or need.needed)
+ local function num(x)
+  if type(x) == "number" then
+   return x
+  end
+  if type(x) == "string" then
+   return tonumber(x)
+  end
+  return nil
  end
- if not n then
-  n = tonumber(r.count) or tonumber(r.amount) or tonumber(r.missing)
+ -- MineColonies BuildingBuilderResource: getAmount() -> total for structure, getAvailable() -> in builder+chest
+ local total = num(r.amount) or num(r.total) or num(r.totalNeeded) or num(r.total_needed) or num(r.required) or num(r.targetCount)
+ local avail =
+  num(r.amountAvailable)
+   or num(r.available)
+   or num(r.availableAmount)
+   or num(r.amount_available)
+   or num(r.delivered)
+   or num(r.stored)
+ local n = nil
+ if total and avail ~= nil and total > avail then
+  n = total - avail
+ end
+ if not n or n < 1 then
+  local need = r.needed
+  if type(need) == "number" then
+   n = need
+  elseif type(need) == "string" then
+   n = tonumber(need)
+  elseif type(need) == "table" then
+   n = tonumber(need.count or need.amount or need.needed)
+  end
+ end
+ if not n or n < 1 then
+  n = num(r.count) or num(r.amount) or num(r.missing) or num(r.remaining) or num(r.shortage) or num(r.deficit)
  end
  if not n or n < 1 then
   n = 1
  end
- return n
+ return math.floor(n + 0.5)
+end
+
+local function detailSuffixFromNeedRow(r)
+ if type(r) ~= "table" then
+  return ""
+ end
+ local function num(x)
+  if type(x) == "number" then
+   return x
+  end
+  if type(x) == "string" then
+   return tonumber(x)
+  end
+  return nil
+ end
+ local total = num(r.amount) or num(r.total) or num(r.totalNeeded) or num(r.total_needed) or num(r.required) or num(r.targetCount)
+ local avail =
+  num(r.amountAvailable)
+   or num(r.available)
+   or num(r.availableAmount)
+   or num(r.amount_available)
+   or num(r.delivered)
+   or num(r.stored)
+ if total and avail then
+  return string.format(" (%d/%d)", avail, total)
+ end
+ return ""
 end
 
 local function fetchColonyUiSnapshot(colony, nowMs)
@@ -486,6 +536,7 @@ local function fetchColonyUiSnapshot(colony, nowMs)
      if type(comps) ~= "table" then
       comps = {}
      end
+     local sfx = detailSuffixFromNeedRow(r)
      local prev = needsMap[key]
      if prev then
       if constructionNeedDuplicateMerge == "sum" then
@@ -496,6 +547,9 @@ local function fetchColonyUiSnapshot(colony, nowMs)
       if st == "DONT_HAVE" then
        prev.status = "DONT_HAVE"
       end
+      if sfx and #sfx > 0 then
+       prev.detailSuffix = sfx
+      end
      else
       needsMap[key] = {
        workOrderId = woId,
@@ -505,6 +559,7 @@ local function fetchColonyUiSnapshot(colony, nowMs)
        needed = n,
        status = st,
        components = comps,
+       detailSuffix = sfx and #sfx > 0 and sfx or "",
       }
      end
     end
@@ -564,9 +619,10 @@ local function fetchColonyUiSnapshot(colony, nowMs)
     if #flat > 0 then
      local tr = flat[1]
      local tlab = tr.displayName or prettifyItemId(tr.name or "?")
+     local sfx = tr.detailSuffix or ""
      table.insert(
       lines,
-      string.format("[COLONY] Top need: %s x%d (%s)", tlab, tr.needed, tr.status)
+      string.format("[COLONY] Top need: %s x%d (%s)%s", tlab, tr.needed, tr.status, sfx)
      )
     end
     local cap = math.max(1, constructionNeedsMaxItems or 14)
@@ -574,9 +630,10 @@ local function fetchColonyUiSnapshot(colony, nowMs)
      local row = flat[i]
      local label = row.displayName or prettifyItemId(row.name)
      local extra = row.status == "DONT_HAVE" and " !" or ""
+     local sfx = row.detailSuffix or ""
      table.insert(
       needsLines,
-      string.format("[NEEDS] %s x%d %s%s", label, row.needed, row.status, extra)
+      string.format("[NEEDS] %s x%d %s%s%s", label, row.needed, row.status, extra, sfx)
      )
      needsEntries[#needsEntries + 1] = {
       workOrderId = row.workOrderId,
@@ -586,6 +643,7 @@ local function fetchColonyUiSnapshot(colony, nowMs)
       needed = row.needed,
       status = row.status,
       components = row.components,
+      detailSuffix = row.detailSuffix,
      }
     end
     if #flat > cap then
@@ -1342,7 +1400,11 @@ local function manualConstructionPush(bridge, colony, monitor)
  end
  logAndDisplay(string.format("[MANUAL] Footer push: %d material line(s)", #entries))
  for _, entry in ipairs(entries) do
-  local need = math.max(1, tonumber(entry.needed) or 1)
+  if tostring(entry.status or "") == "NOT_NEEDED" then
+  else
+  local need = math.floor(tonumber(entry.needed) or 0)
+  if need < 1 then
+  else
   local label = entry.displayName or prettifyItemId(entry.name)
   local idLog = entry.name
   local stock = bridgeStockCountForNeed(bridge, entry)
@@ -1370,6 +1432,8 @@ local function manualConstructionPush(bridge, colony, monitor)
    }
    local fakeReq = { count = remain, target = "work-order", items = { fakeRi } }
    craftHandler(fakeReq, nil, bridge, remain, label, idLog)
+  end
+  end
   end
  end
  processExportBuffer(bridge)
