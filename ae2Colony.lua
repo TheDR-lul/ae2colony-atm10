@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.5.6-atm10"
+local scriptVersion = "0.5.7-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -15,12 +15,12 @@ if not requiredAP then
 end
 if strictAdvancedPeripheralsVersion then
  if not apVersionsTested[requiredAP] then
-  error("Incompatible Advanced Peripherals version: " .. tostring(requiredAP))
+ error("Incompatible Advanced Peripherals version: " .. tostring(requiredAP))
  end
 elseif not apVersionsTested[requiredAP] then
  print(string.format(
-  "[INFO] Advanced Peripherals %s is not in the narrow tested list — continuing anyway (ATM10 / newer AP).",
-  tostring(requiredAP)
+ "[INFO] Advanced Peripherals %s is not in the narrow tested list — continuing anyway (ATM10 / newer AP).",
+ tostring(requiredAP)
  ))
 end
 
@@ -29,6 +29,7 @@ author: toastonrye
 https://github.com/toastonrye/ae2Colony/blob/main/README.md
 Public install latest (CC:Tweaked): wget run https://raw.githubusercontent.com/TheDR-lul/ae2colony-atm10/main/ae2Colony.lua
 Frozen stable v0.4.6: wget run https://raw.githubusercontent.com/TheDR-lul/ae2colony-atm10/main/releases/ae2Colony-v0.4.6.lua
+Public repo: github.com/TheDR-lul/ae2colony-atm10 only. Do not use raw.githubusercontent.com/.../smarthome/... (private -> 404 in-game).
 Optional config (same folder as script): ae2colony_config.lua — see ae2colony_config.example.lua on GitHub.
 
 Setup
@@ -95,6 +96,8 @@ local constructionNeedsMaxItems = 14
 local showConstructionPushFooter = true
 -- Also merge colony.getBuilderResources(builderPos) into NEEDS (often closer to the in-game construction list).
 local mergeBuilderHutResources = true
+-- Work orders often omit wrow.builder; AP documents builderHome. When still no coords, scan getBuildings() for builder huts.
+local mergeBuilderHutAutoScan = true
 -- Same item from WO + builder APIs often duplicates; "max" avoids inflated counts. Use "sum" only if you know you need additive merge.
 local constructionNeedDuplicateMerge = "max"
 -- Hide NOT_NEEDED rows so the list matches "still owe the build"; set false to debug raw API rows.
@@ -113,118 +116,121 @@ local monitorGroupOrder = {
 
 local function mergeUserConfig()
  if not fs.exists("ae2colony_config.lua") then
-  return
+ return
  end
  local fn, err = loadfile("ae2colony_config.lua")
  if not fn then
-  return
+ return
  end
  local ok, tbl = pcall(fn)
  if not ok or type(tbl) ~= "table" then
-  return
+ return
  end
  if tbl.exportSide ~= nil then
-  exportSide = tbl.exportSide
+ exportSide = tbl.exportSide
  end
  if tbl.exportChestPeripheral ~= nil then
-  exportChestPeripheral = tbl.exportChestPeripheral
+ exportChestPeripheral = tbl.exportChestPeripheral
  end
  if tbl.exportLedgerFile ~= nil then
-  exportLedgerFile = tbl.exportLedgerFile
+ exportLedgerFile = tbl.exportLedgerFile
  end
  if tbl.craftMaxStack ~= nil then
-  craftMaxStack = tbl.craftMaxStack
+ craftMaxStack = tbl.craftMaxStack
  end
  if tbl.scanInterval ~= nil then
-  scanInterval = tbl.scanInterval
+ scanInterval = tbl.scanInterval
  end
  if tbl.doLog ~= nil then
-  doLog = tbl.doLog
+ doLog = tbl.doLog
  end
  if tbl.doLogExtra ~= nil then
-  doLogExtra = tbl.doLogExtra
+ doLogExtra = tbl.doLogExtra
  end
  if tbl.logFolder ~= nil then
-  logFolder = tbl.logFolder
+ logFolder = tbl.logFolder
  end
  if tbl.maxLogs ~= nil then
-  maxLogs = tbl.maxLogs
+ maxLogs = tbl.maxLogs
  end
  if tbl.maxLogSize ~= nil then
-  maxLogSize = tbl.maxLogSize
+ maxLogSize = tbl.maxLogSize
  end
  if tbl.colonyUiInterval ~= nil then
-  colonyUiInterval = tonumber(tbl.colonyUiInterval) or colonyUiInterval
+ colonyUiInterval = tonumber(tbl.colonyUiInterval) or colonyUiInterval
  end
  if tbl.showConstructionDetail ~= nil then
-  showConstructionDetail = tbl.showConstructionDetail
+ showConstructionDetail = tbl.showConstructionDetail
  end
  if tbl.showBuildingsList ~= nil then
-  showBuildingsList = tbl.showBuildingsList
+ showBuildingsList = tbl.showBuildingsList
  end
  if tbl.buildingsBreakerMinutes ~= nil then
-  local m = tonumber(tbl.buildingsBreakerMinutes)
-  if m and m > 0 then
-   buildingsBreakerMs = m * 60 * 1000
-  end
+ local m = tonumber(tbl.buildingsBreakerMinutes)
+ if m and m > 0 then
+ buildingsBreakerMs = m * 60 * 1000
+ end
  end
  if tbl.maxLinesPerGroup ~= nil then
-  maxLinesPerGroup = tonumber(tbl.maxLinesPerGroup) or maxLinesPerGroup
+ maxLinesPerGroup = tonumber(tbl.maxLinesPerGroup) or maxLinesPerGroup
  end
  if type(tbl.monitorGroupOrder) == "table" then
-  monitorGroupOrder = tbl.monitorGroupOrder
+ monitorGroupOrder = tbl.monitorGroupOrder
  end
  if tbl.showConstructionNeedsList ~= nil then
-  showConstructionNeedsList = tbl.showConstructionNeedsList
+ showConstructionNeedsList = tbl.showConstructionNeedsList
  end
  if tbl.constructionNeedsMaxWorkOrders ~= nil then
-  constructionNeedsMaxWorkOrders = tonumber(tbl.constructionNeedsMaxWorkOrders) or constructionNeedsMaxWorkOrders
+ constructionNeedsMaxWorkOrders = tonumber(tbl.constructionNeedsMaxWorkOrders) or constructionNeedsMaxWorkOrders
  end
  if tbl.constructionNeedsMaxItems ~= nil then
-  constructionNeedsMaxItems = tonumber(tbl.constructionNeedsMaxItems) or constructionNeedsMaxItems
+ constructionNeedsMaxItems = tonumber(tbl.constructionNeedsMaxItems) or constructionNeedsMaxItems
  end
  if tbl.showConstructionPushFooter ~= nil then
-  showConstructionPushFooter = tbl.showConstructionPushFooter
+ showConstructionPushFooter = tbl.showConstructionPushFooter
  end
  if tbl.mergeBuilderHutResources ~= nil then
-  mergeBuilderHutResources = tbl.mergeBuilderHutResources
+ mergeBuilderHutResources = tbl.mergeBuilderHutResources
+ end
+ if tbl.mergeBuilderHutAutoScan ~= nil then
+ mergeBuilderHutAutoScan = tbl.mergeBuilderHutAutoScan
  end
  if tbl.constructionNeedDuplicateMerge == "sum" or tbl.constructionNeedDuplicateMerge == "max" then
-  constructionNeedDuplicateMerge = tbl.constructionNeedDuplicateMerge
+ constructionNeedDuplicateMerge = tbl.constructionNeedDuplicateMerge
  end
  if tbl.constructionNeedsHideNotNeeded ~= nil then
-  constructionNeedsHideNotNeeded = tbl.constructionNeedsHideNotNeeded
+ constructionNeedsHideNotNeeded = tbl.constructionNeedsHideNotNeeded
  end
  if type(tbl.missingPatternHook) == "table" then
-  for mk, mv in pairs(tbl.missingPatternHook) do
-   missingPatternHook[mk] = mv
-  end
+ for mk, mv in pairs(tbl.missingPatternHook) do
+ missingPatternHook[mk] = mv
+ end
  end
  if type(tbl.blacklistedTags) == "table" then
-  blacklistedTags = tbl.blacklistedTags
+ blacklistedTags = tbl.blacklistedTags
  end
  if type(tbl.whitelistItemName) == "table" then
-  whitelistItemName = tbl.whitelistItemName
+ whitelistItemName = tbl.whitelistItemName
  end
  print("[ae2Colony] Merged ae2colony_config.lua")
 end
 
 local function prettifyItemId(id)
  if type(id) ~= "string" then
-  return "?"
+ return "?"
  end
  local _, item = id:match("^([^:]+):(.+)$")
  if not item then
-  return id
+ return id
  end
  local parts = {}
  for part in item:gmatch("[^_]+") do
-  if #part > 0 then
-   table.insert(parts, part:sub(1, 1):upper() .. part:sub(2):lower())
-  end
+ if #part > 0 then
+ table.insert(parts, part:sub(1, 1):upper() .. part:sub(2):lower())
+ end
  end
  if #parts == 0 then
-  return id
+ return id
  end
  return table.concat(parts, " ")
 end
@@ -232,10 +238,10 @@ end
 local function describeItemLabel(requestItem, bridgeItem, idOverride)
  local id = idOverride or (requestItem and requestItem.name) or "?"
  if bridgeItem and type(bridgeItem.displayName) == "string" and #bridgeItem.displayName > 0 then
-  return bridgeItem.displayName, id
+ return bridgeItem.displayName, id
  end
  if requestItem and type(requestItem.displayName) == "string" and #requestItem.displayName > 0 then
-  return requestItem.displayName, id
+ return requestItem.displayName, id
  end
  return prettifyItemId(id), id
 end
@@ -243,7 +249,7 @@ end
 local function formatItemAction(prefix, count, label, id, extra)
  local base = string.format("%s x%d %s (%s)", prefix, count, label, id)
  if extra and #extra > 0 then
-  return base .. " " .. extra
+ return base .. " " .. extra
  end
  return base
 end
@@ -254,33 +260,33 @@ end
 
 local function loadExportLedger()
  if not exportLedgerFile or #exportLedgerFile == 0 then
-  return
+ return
  end
  if not fs.exists(exportLedgerFile) then
-  return
+ return
  end
  local f = fs.open(exportLedgerFile, "r")
  if not f then
-  return
+ return
  end
  local txt = f.readAll()
  f.close()
  if not txt or #txt == 0 then
-  return
+ return
  end
  local ok, data = pcall(textutils.unserializeJSON, txt)
  if ok and type(data) == "table" then
-  exportLedger = data
+ exportLedger = data
  end
 end
 
 local function saveExportLedger()
  if not exportLedgerFile or #exportLedgerFile == 0 then
-  return
+ return
  end
  local f = fs.open(exportLedgerFile, "w")
  if not f then
-  return
+ return
  end
  f.write(textutils.serializeJSON(exportLedger))
  f.close()
@@ -288,26 +294,26 @@ end
 
 local function syncExportLedger(colonyRequests)
  if not colonyRequests then
-  return
+ return
  end
  local present = {}
  for _, request in ipairs(colonyRequests) do
-  if request.items and request.items[1] then
-   local it = request.items[1]
-   local t = request.target or request.name or ""
-   local k = makeLedgerKey(it.fingerprint, it.name, t)
-   present[k] = true
-   local raw = request.count or 0
-   local out = exportLedger[k] or 0
-   if raw < out then
-    exportLedger[k] = nil
-   end
-  end
+ if request.items and request.items[1] then
+ local it = request.items[1]
+ local t = request.target or request.name or ""
+ local k = makeLedgerKey(it.fingerprint, it.name, t)
+ present[k] = true
+ local raw = request.count or 0
+ local out = exportLedger[k] or 0
+ if raw < out then
+ exportLedger[k] = nil
+ end
+ end
  end
  for k, _ in pairs(exportLedger) do
-  if not present[k] then
-   exportLedger[k] = nil
-  end
+ if not present[k] then
+ exportLedger[k] = nil
+ end
  end
 end
 
@@ -317,128 +323,193 @@ local colonyUiSnapshot = { headerCompact = "", lines = {}, needsLines = {}, need
 local function collectResourceRows(res)
  local rows = {}
  if type(res) ~= "table" then
-  return rows
+ return rows
  end
  if type(res.resources) == "table" then
-  return collectResourceRows(res.resources)
+ return collectResourceRows(res.resources)
  end
  local maxk = 0
  for k, _ in pairs(res) do
-  if type(k) == "number" and k > maxk then
-   maxk = k
-  end
+ if type(k) == "number" and k > maxk then
+ maxk = k
+ end
  end
  for i = 1, maxk do
-  local v = res[i]
-  if type(v) == "table" then
-   rows[#rows + 1] = v
-  end
+ local v = res[i]
+ if type(v) == "table" then
+ rows[#rows + 1] = v
+ end
  end
  if #rows == 0 then
-  for _, v in pairs(res) do
-   if type(v) == "table" and (v.item or v.name or v.displayName or v.id) then
-    rows[#rows + 1] = v
-   end
-  end
+ for _, v in pairs(res) do
+ if type(v) == "table" and (v.item or v.name or v.displayName or v.id) then
+ rows[#rows + 1] = v
+ end
+ end
  end
  return rows
 end
 
 local function itemIdFromNeedRow(r)
  if type(r) ~= "table" then
-  return nil
+ return nil
  end
  local it = r.item
  if type(it) == "string" and #it > 0 then
-  return it
+ return it
  end
  if type(it) == "table" then
-  if type(it.name) == "string" and #it.name > 0 then
-   return it.name
-  end
-  if type(it.id) == "string" and #it.id > 0 then
-   return it.id
-  end
+ if type(it.name) == "string" and #it.name > 0 then
+ return it.name
+ end
+ if type(it.id) == "string" and #it.id > 0 then
+ return it.id
+ end
  end
  if type(r.name) == "string" and #r.name > 0 then
-  return r.name
+ return r.name
  end
  if type(r.id) == "string" and #r.id > 0 and r.id:find(":") then
-  return r.id
+ return r.id
  end
  return nil
 end
 
 local function quantityFromNeedRow(r)
  if type(r) ~= "table" then
-  return 1
+ return 1
  end
  local function num(x)
-  if type(x) == "number" then
-   return x
-  end
-  if type(x) == "string" then
-   return tonumber(x)
-  end
-  return nil
+ if type(x) == "number" then
+ return x
+ end
+ if type(x) == "string" then
+ return tonumber(x)
+ end
+ return nil
  end
  -- MineColonies BuildingBuilderResource: getAmount() -> total for structure, getAvailable() -> in builder+chest
  local total = num(r.amount) or num(r.total) or num(r.totalNeeded) or num(r.total_needed) or num(r.required) or num(r.targetCount)
  local avail =
-  num(r.amountAvailable)
-   or num(r.available)
-   or num(r.availableAmount)
-   or num(r.amount_available)
-   or num(r.delivered)
-   or num(r.stored)
+ num(r.amountAvailable)
+ or num(r.available)
+ or num(r.availableAmount)
+ or num(r.amount_available)
+ or num(r.delivered)
+ or num(r.stored)
  local n = nil
  if total and avail ~= nil and total > avail then
-  n = total - avail
+ n = total - avail
  end
  if not n or n < 1 then
-  local need = r.needed
-  if type(need) == "number" then
-   n = need
-  elseif type(need) == "string" then
-   n = tonumber(need)
-  elseif type(need) == "table" then
-   n = tonumber(need.count or need.amount or need.needed)
-  end
+ local need = r.needed
+ if type(need) == "number" then
+ n = need
+ elseif type(need) == "string" then
+ n = tonumber(need)
+ elseif type(need) == "table" then
+ n = tonumber(need.count or need.amount or need.needed)
+ end
  end
  if not n or n < 1 then
-  n = num(r.count) or num(r.amount) or num(r.missing) or num(r.remaining) or num(r.shortage) or num(r.deficit)
+ n = num(r.count) or num(r.amount) or num(r.missing) or num(r.remaining) or num(r.shortage) or num(r.deficit)
  end
  if not n or n < 1 then
-  n = 1
+ n = 1
  end
  return math.floor(n + 0.5)
 end
 
 local function detailSuffixFromNeedRow(r)
  if type(r) ~= "table" then
-  return ""
+ return ""
  end
  local function num(x)
-  if type(x) == "number" then
-   return x
-  end
-  if type(x) == "string" then
-   return tonumber(x)
-  end
-  return nil
+ if type(x) == "number" then
+ return x
+ end
+ if type(x) == "string" then
+ return tonumber(x)
+ end
+ return nil
  end
  local total = num(r.amount) or num(r.total) or num(r.totalNeeded) or num(r.total_needed) or num(r.required) or num(r.targetCount)
  local avail =
-  num(r.amountAvailable)
-   or num(r.available)
-   or num(r.availableAmount)
-   or num(r.amount_available)
-   or num(r.delivered)
-   or num(r.stored)
+ num(r.amountAvailable)
+ or num(r.available)
+ or num(r.availableAmount)
+ or num(r.amount_available)
+ or num(r.delivered)
+ or num(r.stored)
  if total and avail then
-  return string.format(" (%d/%d)", avail, total)
+ return string.format(" (%d/%d)", avail, total)
  end
  return ""
+end
+
+local function normalizeBlockPos(p)
+ if type(p) ~= "table" then
+ return nil
+ end
+ if p.x == nil or p.z == nil then
+ return nil
+ end
+ return { x = p.x, y = p.y or 0, z = p.z }
+end
+
+local function isBuilderHutBuilding(b)
+ if type(b) ~= "table" then
+ return false
+ end
+ local t = tostring(b.type or ""):lower()
+ if t == "" then
+ return false
+ end
+ if t:find("buildertools", 1, true) then
+ return false
+ end
+ return t:find("builder", 1, true) ~= nil
+end
+
+local function builderPosCandidatesFromWorkOrder(wrow)
+ if type(wrow) ~= "table" then
+ return {}
+ end
+ local out = {}
+ local keys = { "builderHome", "builder", "builderPos", "buildersHut", "hutPos" }
+ for _, k in ipairs(keys) do
+ local pos = normalizeBlockPos(wrow[k])
+ if pos then
+ out[#out + 1] = pos
+ end
+ end
+ return out
+end
+
+local function posKey(p)
+ if not p then
+ return nil
+ end
+ return string.format("%d,%d,%d", math.floor(p.x + 0.5), math.floor(p.y + 0.5), math.floor(p.z + 0.5))
+end
+
+local function collectBuilderHutPositionsFromBuildings(colony)
+ local positions = {}
+ local ok, buildings = pcall(function()
+ return colony.getBuildings()
+ end)
+ if not ok or type(buildings) ~= "table" then
+ return positions
+ end
+ for _, b in pairs(buildings) do
+ if isBuilderHutBuilding(b) then
+ local pos = normalizeBlockPos(b.pos or b.location)
+ if pos then
+ positions[#positions + 1] = pos
+ end
+ end
+ end
+ return positions
 end
 
 local function fetchColonyUiSnapshot(colony, nowMs)
@@ -447,262 +518,288 @@ local function fetchColonyUiSnapshot(colony, nowMs)
  local needsEntries = {}
  local parts = {}
  local function pcallNum(fn)
-  local ok, v = pcall(fn)
-  if ok and v ~= nil then
-   return true, v
-  end
-  return false, nil
+ local ok, v = pcall(fn)
+ if ok and v ~= nil then
+ return true, v
+ end
+ return false, nil
  end
  local okN, name = pcall(function()
-  return colony.getColonyName()
+ return colony.getColonyName()
  end)
  if okN and name then
-  table.insert(parts, tostring(name))
+ table.insert(parts, tostring(name))
  end
  local okS, sites = pcall(function()
-  return colony.amountOfConstructionSites()
+ return colony.amountOfConstructionSites()
  end)
  if okS then
-  table.insert(parts, "Sites:" .. tostring(sites))
+ table.insert(parts, "Sites:" .. tostring(sites))
  end
  local okC, cur = pcall(function()
-  return colony.amountOfCitizens()
+ return colony.amountOfCitizens()
  end)
  local okM, maxc = pcall(function()
-  return colony.maxOfCitizens()
+ return colony.maxOfCitizens()
  end)
  if okC then
-  if okM then
-   table.insert(parts, string.format("Cit:%s/%s", tostring(cur), tostring(maxc)))
-  else
-   table.insert(parts, "Cit:" .. tostring(cur))
-  end
+ if okM then
+ table.insert(parts, string.format("Cit:%s/%s", tostring(cur), tostring(maxc)))
+ else
+ table.insert(parts, "Cit:" .. tostring(cur))
+ end
  end
  local okH, happy = pcall(function()
-  return colony.getHappiness()
+ return colony.getHappiness()
  end)
  if okH and happy ~= nil then
-  table.insert(parts, "Hap:" .. string.format("%.0f", happy))
+ table.insert(parts, "Hap:" .. string.format("%.0f", happy))
  end
  local okA, attack = pcall(function()
-  return colony.isUnderAttack()
+ return colony.isUnderAttack()
  end)
  if okA and attack then
-  table.insert(lines, "[WARN] Colony UNDER ATTACK")
+ table.insert(lines, "[WARN] Colony UNDER ATTACK")
  end
  if showConstructionDetail then
-  local okW, wo = pcall(function()
-   return colony.getWorkOrders()
-  end)
-  if okW and type(wo) == "table" then
-   local list = {}
-   for i = 1, #wo do
-    list[#list + 1] = wo[i]
-   end
-   table.sort(list, function(a, b)
-    return (tonumber(a.priority) or 0) > (tonumber(b.priority) or 0)
-   end)
-   local top = math.min(3, #list)
-   for i = 1, top do
-    local w = list[i]
-    local bn = w.buildingName or w.type or "?"
-    local tl = w.targetLevel
-    local tlStr = tl ~= nil and tostring(tl) or "?"
-    local cl = w.isClaimed and "claimed" or "open"
-    local pri = w.priority
-    table.insert(
-     lines,
-     string.format("[COLONY] WO %s ->Lv%s %s pri=%s", tostring(bn), tlStr, cl, tostring(pri))
-    )
-   end
-   if showConstructionNeedsList and top > 0 then
-    local needsMap = {}
-    local function mergeNeedRow(woId, r)
-     if type(r) ~= "table" then
-      return
-     end
-     local name = itemIdFromNeedRow(r)
-     if type(name) ~= "string" or #name == 0 then
-      return
-     end
-     local fp = r.fingerprint
-     if type(fp) == "table" and type(fp.hash) == "string" then
-      fp = fp.hash
-     end
-     local key = (fp and tostring(fp)) or name
-     local n = quantityFromNeedRow(r)
-     local st = tostring(r.status or "?")
-     local comps = r.components
-     if type(comps) ~= "table" then
-      comps = {}
-     end
-     local sfx = detailSuffixFromNeedRow(r)
-     local prev = needsMap[key]
-     if prev then
-      if constructionNeedDuplicateMerge == "sum" then
-       prev.needed = prev.needed + n
-      else
-       prev.needed = math.max(prev.needed, n)
-      end
-      if st == "DONT_HAVE" then
-       prev.status = "DONT_HAVE"
-      end
-      if sfx and #sfx > 0 then
-       prev.detailSuffix = sfx
-      end
-     else
-      needsMap[key] = {
-       workOrderId = woId,
-       name = name,
-       fingerprint = fp,
-       displayName = r.displayName,
-       needed = n,
-       status = st,
-       components = comps,
-       detailSuffix = sfx and #sfx > 0 and sfx or "",
-      }
-     end
-    end
+ local okW, wo = pcall(function()
+ return colony.getWorkOrders()
+ end)
+ if okW and type(wo) == "table" then
+ local list = {}
+ for i = 1, #wo do
+ list[#list + 1] = wo[i]
+ end
+ table.sort(list, function(a, b)
+ return (tonumber(a.priority) or 0) > (tonumber(b.priority) or 0)
+ end)
+ local top = math.min(3, #list)
+ for i = 1, top do
+ local w = list[i]
+ local bn = w.buildingName or w.type or "?"
+ local tl = w.targetLevel
+ local tlStr = tl ~= nil and tostring(tl) or "?"
+ local cl = w.isClaimed and "claimed" or "open"
+ local pri = w.priority
+ table.insert(
+ lines,
+ string.format("[COLONY] WO %s ->Lv%s %s pri=%s", tostring(bn), tlStr, cl, tostring(pri))
+ )
+ end
+ if showConstructionNeedsList and top > 0 then
+ local needsMap = {}
+ local function mergeNeedRow(woId, r)
+ if type(r) ~= "table" then
+ return
+ end
+ local name = itemIdFromNeedRow(r)
+ if type(name) ~= "string" or #name == 0 then
+ return
+ end
+ local fp = r.fingerprint
+ if type(fp) == "table" and type(fp.hash) == "string" then
+ fp = fp.hash
+ end
+ local key = (fp and tostring(fp)) or name
+ local n = quantityFromNeedRow(r)
+ local st = tostring(r.status or "?")
+ local comps = r.components
+ if type(comps) ~= "table" then
+ comps = {}
+ end
+ local sfx = detailSuffixFromNeedRow(r)
+ local prev = needsMap[key]
+ if prev then
+ if constructionNeedDuplicateMerge == "sum" then
+ prev.needed = prev.needed + n
+ else
+ prev.needed = math.max(prev.needed, n)
+ end
+ if st == "DONT_HAVE" then
+ prev.status = "DONT_HAVE"
+ end
+ if sfx and #sfx > 0 then
+ prev.detailSuffix = sfx
+ end
+ else
+ needsMap[key] = {
+ workOrderId = woId,
+ name = name,
+ fingerprint = fp,
+ displayName = r.displayName,
+ needed = n,
+ status = st,
+ components = comps,
+ detailSuffix = sfx and #sfx > 0 and sfx or "",
+ }
+ end
+ end
 
-    local woLimit = math.min(constructionNeedsMaxWorkOrders, top)
-    for wi = 1, woLimit do
-     local wrow = list[wi]
-     if wrow and wrow.id ~= nil then
-      local okRes, res = pcall(function()
-       return colony.getWorkOrderResources(wrow.id)
-      end)
-      if okRes and type(res) == "table" then
-       local rows = collectResourceRows(res)
-       for _, row in ipairs(rows) do
-        mergeNeedRow(wrow.id, row)
-       end
-      end
-     end
-    end
+ local woLimit = math.min(constructionNeedsMaxWorkOrders, top)
+ for wi = 1, woLimit do
+ local wrow = list[wi]
+ if wrow and wrow.id ~= nil then
+ local okRes, res = pcall(function()
+ return colony.getWorkOrderResources(wrow.id)
+ end)
+ if okRes and type(res) == "table" then
+ local rows = collectResourceRows(res)
+ for _, row in ipairs(rows) do
+ mergeNeedRow(wrow.id, row)
+ end
+ end
+ end
+ end
 
-    if mergeBuilderHutResources then
-     for wi = 1, woLimit do
-      local wrow = list[wi]
-      local bp = wrow and wrow.builder
-      if type(bp) == "table" and bp.x ~= nil and bp.z ~= nil then
-       local okBr, bred = pcall(function()
-        return colony.getBuilderResources({
-         x = bp.x,
-         y = bp.y or 0,
-         z = bp.z,
-        })
-       end)
-       if okBr and type(bred) == "table" then
-        local brows = collectResourceRows(bred)
-        for _, row in ipairs(brows) do
-         mergeNeedRow(wrow.id, row)
-        end
-       end
-      end
-     end
-    end
+ if mergeBuilderHutResources then
+ local mergedBuilderPos = {}
+ local function tryMergeBuilderAt(bp, woId)
+ local k = posKey(bp)
+ if not k or mergedBuilderPos[k] then
+ return
+ end
+ local okBr, bred = pcall(function()
+ return colony.getBuilderResources({
+ x = bp.x,
+ y = bp.y or 0,
+ z = bp.z,
+ })
+ end)
+ if okBr and type(bred) == "table" then
+ mergedBuilderPos[k] = true
+ local brows = collectResourceRows(bred)
+ for _, row in ipairs(brows) do
+ mergeNeedRow(woId, row)
+ end
+ end
+ end
 
-    local flat = {}
-    for _, row in pairs(needsMap) do
-     if not (constructionNeedsHideNotNeeded and tostring(row.status or "") == "NOT_NEEDED") then
-      flat[#flat + 1] = row
-     end
-    end
-    table.sort(flat, function(a, b)
-     local sa = a.status == "DONT_HAVE" and 0 or 1
-     local sb = b.status == "DONT_HAVE" and 0 or 1
-     if sa ~= sb then
-      return sa < sb
-     end
-     return tostring(a.displayName or a.name) < tostring(b.displayName or b.name)
-    end)
-    if #flat > 0 then
-     local tr = flat[1]
-     local tlab = tr.displayName or prettifyItemId(tr.name or "?")
-     local sfx = tr.detailSuffix or ""
-     table.insert(
-      lines,
-      string.format("[COLONY] Top need: %s x%d (%s)%s", tlab, tr.needed, tr.status, sfx)
-     )
-    end
-    local cap = math.max(1, constructionNeedsMaxItems or 14)
-    for i = 1, math.min(#flat, cap) do
-     local row = flat[i]
-     local label = row.displayName or prettifyItemId(row.name)
-     local extra = row.status == "DONT_HAVE" and " !" or ""
-     local sfx = row.detailSuffix or ""
-     table.insert(
-      needsLines,
-      string.format("[NEEDS] %s x%d %s%s%s", label, row.needed, row.status, extra, sfx)
-     )
-     needsEntries[#needsEntries + 1] = {
-      workOrderId = row.workOrderId,
-      name = row.name,
-      fingerprint = row.fingerprint,
-      displayName = row.displayName,
-      needed = row.needed,
-      status = row.status,
-      components = row.components,
-      detailSuffix = row.detailSuffix,
-     }
-    end
-    if #flat > cap then
-     table.insert(needsLines, string.format("[NEEDS] ... +%d more (see log)", #flat - cap))
-    end
-   elseif showConstructionDetail and top > 0 and list[1] and list[1].id ~= nil then
-    local okR, res = pcall(function()
-     return colony.getWorkOrderResources(list[1].id)
-    end)
-    if okR and type(res) == "table" then
-     local rows = collectResourceRows(res)
-     if #rows > 0 then
-      local r = rows[1]
-      local rn = r.displayName or itemIdFromNeedRow(r) or "?"
-      local rq = quantityFromNeedRow(r)
-      table.insert(
-       lines,
-       string.format("[COLONY] Top need: %s x%s (%s)", tostring(rn), tostring(rq), tostring(r.status or "?"))
-      )
-     end
-    end
-   end
-  end
+ for wi = 1, woLimit do
+ local wrow = list[wi]
+ if wrow and wrow.id ~= nil then
+ local wid = wrow.id
+ for _, bp in ipairs(builderPosCandidatesFromWorkOrder(wrow)) do
+ tryMergeBuilderAt(bp, wid)
+ end
+ end
+ end
+
+ if mergeBuilderHutAutoScan then
+ local nMerged = 0
+ for _ in pairs(mergedBuilderPos) do
+ nMerged = nMerged + 1
+ end
+ if nMerged == 0 then
+ local scanPositions = collectBuilderHutPositionsFromBuildings(colony)
+ local fallbackWoId = list[1] and list[1].id or "builder-scan"
+ for _, bp in ipairs(scanPositions) do
+ tryMergeBuilderAt(bp, fallbackWoId)
+ end
+ end
+ end
+ end
+
+ local flat = {}
+ for _, row in pairs(needsMap) do
+ if not (constructionNeedsHideNotNeeded and tostring(row.status or "") == "NOT_NEEDED") then
+ flat[#flat + 1] = row
+ end
+ end
+ table.sort(flat, function(a, b)
+ local sa = a.status == "DONT_HAVE" and 0 or 1
+ local sb = b.status == "DONT_HAVE" and 0 or 1
+ if sa ~= sb then
+ return sa < sb
+ end
+ return tostring(a.displayName or a.name) < tostring(b.displayName or b.name)
+ end)
+ if #flat > 0 then
+ local tr = flat[1]
+ local tlab = tr.displayName or prettifyItemId(tr.name or "?")
+ local sfx = tr.detailSuffix or ""
+ table.insert(
+ lines,
+ string.format("[COLONY] Top need: %s x%d (%s)%s", tlab, tr.needed, tr.status, sfx)
+ )
+ end
+ local cap = math.max(1, constructionNeedsMaxItems or 14)
+ for i = 1, math.min(#flat, cap) do
+ local row = flat[i]
+ local label = row.displayName or prettifyItemId(row.name)
+ local extra = row.status == "DONT_HAVE" and " !" or ""
+ local sfx = row.detailSuffix or ""
+ table.insert(
+ needsLines,
+ string.format("[NEEDS] %s x%d %s%s%s", label, row.needed, row.status, extra, sfx)
+ )
+ needsEntries[#needsEntries + 1] = {
+ workOrderId = row.workOrderId,
+ name = row.name,
+ fingerprint = row.fingerprint,
+ displayName = row.displayName,
+ needed = row.needed,
+ status = row.status,
+ components = row.components,
+ detailSuffix = row.detailSuffix,
+ }
+ end
+ if #flat > cap then
+ table.insert(needsLines, string.format("[NEEDS] ... +%d more (see log)", #flat - cap))
+ end
+ elseif showConstructionDetail and top > 0 and list[1] and list[1].id ~= nil then
+ local okR, res = pcall(function()
+ return colony.getWorkOrderResources(list[1].id)
+ end)
+ if okR and type(res) == "table" then
+ local rows = collectResourceRows(res)
+ if #rows > 0 then
+ local r = rows[1]
+ local rn = r.displayName or itemIdFromNeedRow(r) or "?"
+ local rq = quantityFromNeedRow(r)
+ table.insert(
+ lines,
+ string.format("[COLONY] Top need: %s x%s (%s)", tostring(rn), tostring(rq), tostring(r.status or "?"))
+ )
+ end
+ end
+ end
+ end
  end
  if showBuildingsList and nowMs >= buildingsDisabledUntil then
-  local okB, buildings = pcall(function()
-   return colony.getBuildings()
-  end)
-  if okB and type(buildings) == "table" then
-   local shown = 0
-   for i = 1, #buildings do
-    local b = buildings[i]
-    if b and (b.built == false or b.isWorkingOn) then
-     local loc = b.location or {}
-     table.insert(
-      lines,
-      string.format(
-       "[COLONY] Site:%s @%s,%s",
-       tostring(b.name or "?"),
-       tostring(loc.x or "?"),
-       tostring(loc.z or "?")
-      )
-     )
-     shown = shown + 1
-     if shown >= 2 then
-      break
-     end
-    end
-   end
-  else
-   buildingsDisabledUntil = nowMs + buildingsBreakerMs
-   table.insert(lines, "[WARN] getBuildings disabled (API error; see docs)")
-  end
+ local okB, buildings = pcall(function()
+ return colony.getBuildings()
+ end)
+ if okB and type(buildings) == "table" then
+ local shown = 0
+ for i = 1, #buildings do
+ local b = buildings[i]
+ if b and (b.built == false or b.isWorkingOn) then
+ local loc = b.location or {}
+ table.insert(
+ lines,
+ string.format(
+ "[COLONY] Site:%s @%s,%s",
+ tostring(b.name or "?"),
+ tostring(loc.x or "?"),
+ tostring(loc.z or "?")
+ )
+ )
+ shown = shown + 1
+ if shown >= 2 then
+ break
+ end
+ end
+ end
+ else
+ buildingsDisabledUntil = nowMs + buildingsBreakerMs
+ table.insert(lines, "[WARN] getBuildings disabled (API error; see docs)")
+ end
  end
  return {
-  headerCompact = table.concat(parts, " | "),
-  lines = lines,
-  needsLines = needsLines,
-  needsEntries = needsEntries,
+ headerCompact = table.concat(parts, " | "),
+ lines = lines,
+ needsLines = needsLines,
+ needsEntries = needsEntries,
  }
 end
 
@@ -855,23 +952,23 @@ local function updateMonitorGrouped(monitor)
 
  local combinedLines = {}
  for _, ln in ipairs(monitorColonyPrefixLines) do
-  table.insert(combinedLines, ln)
+ table.insert(combinedLines, ln)
  end
  for _, ln in ipairs(monitorLines) do
-  table.insert(combinedLines, ln)
+ table.insert(combinedLines, ln)
  end
 
  for _, line in ipairs(combinedLines) do
  local placed = false
  for _, label in ipairs(monitorGroupOrder) do
-  if not placed and line:find("%[" .. label .. "%]") then
-   table.insert(groups[label], line)
-   placed = true
-   break
-  end
+ if not placed and line:find("%[" .. label .. "%]") then
+ table.insert(groups[label], line)
+ placed = true
+ break
+ end
  end
  if not placed then
-  table.insert(groups["INFO"], line)
+ table.insert(groups["INFO"], line)
  end
  end
 
@@ -884,13 +981,13 @@ local function updateMonitorGrouped(monitor)
  table.insert(flatLines, {text = entries[j], color = colorsMap[label] or colors.white})
  end
  if #entries > cap then
-  table.insert(
-   flatLines,
-   {
-    text = string.format("... +%d more", #entries - cap),
-    color = colors.gray,
-   }
-  )
+ table.insert(
+ flatLines,
+ {
+ text = string.format("... +%d more", #entries - cap),
+ color = colors.gray,
+ }
+ )
  end
  end
  end
@@ -916,17 +1013,17 @@ end
 
 local function drawConstructionFooter(monitor)
  if not monitor or not showConstructionPushFooter then
-  return
+ return
  end
  local w, h = monitor.getSize()
  if h < 5 then
-  return
+ return
  end
  monitor.setCursorPos(1, h)
  monitor.setTextColor(colors.yellow)
  local txt = ">>> CRAFT+EXPORT (NEEDS) <<<"
  if #txt > w then
-  txt = "> CRAFT+EXPORT <"
+ txt = "> CRAFT+EXPORT <"
  end
  monitor.write(txt .. string.rep(" ", math.max(0, w - #txt)))
 end
@@ -943,47 +1040,47 @@ end
 
 local function notifyMissingPatternHook(ctx)
  if not missingPatternHook.enabled then
-  return
+ return
  end
  local name = ctx and ctx.name
  if not name or name == "" then
-  return
+ return
  end
  local now = os.epoch("utc")
  local cdMs = (missingPatternHook.cooldownSeconds or 120) * 1000
  local last = missingHookLastPostMs[name]
  if last and (now - last) < cdMs then
-  return
+ return
  end
  missingHookLastPostMs[name] = now
 
  local payload = {
-  item_id = name,
-  count = ctx.count or 1,
-  fingerprint = ctx.fingerprint or "",
-  target = ctx.target or "",
-  display_label = ctx.display_label or "",
-  ts = now,
+ item_id = name,
+ count = ctx.count or 1,
+ fingerprint = ctx.fingerprint or "",
+ target = ctx.target or "",
+ display_label = ctx.display_label or "",
+ ts = now,
  }
  local body = textutils.serializeJSON(payload)
  if missingPatternHook.logFile and #missingPatternHook.logFile > 0 then
-  local f = fs.open(missingPatternHook.logFile, "a")
-  if f then
-   f.writeLine(body)
-   f.close()
-  end
+ local f = fs.open(missingPatternHook.logFile, "a")
+ if f then
+ f.writeLine(body)
+ f.close()
+ end
  end
  local url = missingPatternHook.httpUrl
  if url and http and http.post then
-  local headers = { ["Content-Type"] = "application/json" }
-  local secret = missingPatternHook.httpSecret
-  if secret and #secret > 0 then
-   headers["X-AE2Colony-Secret"] = secret
-  end
-  local ok, err = pcall(http.post, url, body, headers)
-  if not ok and doLog then
-   logLine("[missingPatternHook] http.post failed: " .. tostring(err))
-  end
+ local headers = { ["Content-Type"] = "application/json" }
+ local secret = missingPatternHook.httpSecret
+ if secret and #secret > 0 then
+ headers["X-AE2Colony-Secret"] = secret
+ end
+ local ok, err = pcall(http.post, url, body, headers)
+ if not ok and doLog then
+ logLine("[missingPatternHook] http.post failed: " .. tostring(err))
+ end
  end
 end
 
@@ -1008,20 +1105,20 @@ end
 -- Newer me_bridge builds reject filters with only fingerprint — require a registry `name` ("mod:id") when possible.
 local function meRegistryName(name)
  if type(name) ~= "string" or #name == 0 then
-  return nil
+ return nil
  end
  if not name:find(":") then
-  return nil
+ return nil
  end
  return name
 end
 
 local function normalizeMeFingerprint(fp)
  if type(fp) == "string" and #fp > 0 then
-  return fp
+ return fp
  end
  if type(fp) == "table" and type(fp.hash) == "string" and #fp.hash > 0 then
-  return fp.hash
+ return fp.hash
  end
  return nil
 end
@@ -1032,16 +1129,16 @@ local function buildMeItemFilter(name, fingerprint, count, components)
  local comps = type(components) == "table" and components or {}
  local c = tonumber(count) or 1
  if c < 1 then
-  c = 1
+ c = 1
  end
  if nm and fp then
-  return { name = nm, fingerprint = fp, count = c, components = comps }
+ return { name = nm, fingerprint = fp, count = c, components = comps }
  end
  if nm then
-  return { name = nm, count = c, components = comps }
+ return { name = nm, count = c, components = comps }
  end
  if fp then
-  return { fingerprint = fp, count = c, components = comps }
+ return { fingerprint = fp, count = c, components = comps }
  end
  return nil
 end
@@ -1066,41 +1163,41 @@ local function processExportBuffer(bridge)
  for _, item in ipairs(exportBuffer) do
  local filter = buildMeItemFilter(item.name, item.fingerprint, item.count, item.components)
  if not filter then
-  logAndDisplay(
-   string.format(
-    "[ERROR] Export skipped (no valid item id): %s",
-    tostring(item.idForLog or item.name or "?")
-   )
-  )
+ logAndDisplay(
+ string.format(
+ "[ERROR] Export skipped (no valid item id): %s",
+ tostring(item.idForLog or item.name or "?")
+ )
+ )
  else
  local ok, result = pcall(function()
-  if exportChestPeripheral and #exportChestPeripheral > 0 then
-   return bridge.exportItemToPeripheral(filter, exportChestPeripheral)
-  end
-  return bridge.exportItem(filter, exportSide)
+ if exportChestPeripheral and #exportChestPeripheral > 0 then
+ return bridge.exportItemToPeripheral(filter, exportChestPeripheral)
+ end
+ return bridge.exportItem(filter, exportSide)
  end)
  local label = item.label or prettifyItemId(item.idForLog or item.name or "?")
  local id = item.idForLog or item.name or "?"
  local tgt = "> " .. tostring(item.target or "")
  if not ok or not result then
-  logAndDisplay(formatItemAction("[ERROR]", item.count, label, id, tgt))
+ logAndDisplay(formatItemAction("[ERROR]", item.count, label, id, tgt))
  else
-  local moved = item.count
-  if type(result) == "number" then
-   moved = result
-  elseif result == true then
-   moved = item.count
-  end
-  if item.ledgerKey and moved > 0 then
-   exportLedger[item.ledgerKey] = (exportLedger[item.ledgerKey] or 0) + moved
-   ledgerDirty = true
-  end
-  logAndDisplay(formatItemAction("[SENT]", moved, label, id, tgt))
+ local moved = item.count
+ if type(result) == "number" then
+ moved = result
+ elseif result == true then
+ moved = item.count
+ end
+ if item.ledgerKey and moved > 0 then
+ exportLedger[item.ledgerKey] = (exportLedger[item.ledgerKey] or 0) + moved
+ ledgerDirty = true
+ end
+ logAndDisplay(formatItemAction("[SENT]", moved, label, id, tgt))
  end
  end
  end
  if ledgerDirty then
-  saveExportLedger()
+ saveExportLedger()
  end
 end
 
@@ -1149,18 +1246,18 @@ local function updateHeader(monitor, bridge, tick, snapshot)
 
  local left = ""
  if snapshot and type(snapshot.headerCompact) == "string" then
-  left = snapshot.headerCompact
+ left = snapshot.headerCompact
  end
  if #left > math.floor(width * 0.58) then
-  left = left:sub(1, math.max(0, math.floor(width * 0.58) - 1))
+ left = left:sub(1, math.max(0, math.floor(width * 0.58) - 1))
  end
  monitor.setCursorPos(1, 2)
  monitor.setTextColor(colors.lightGray)
  monitor.write(left)
  local used = #left
  if used < width then
-  monitor.setTextColor(colors.black)
-  monitor.write(string.rep(" ", width - used))
+ monitor.setTextColor(colors.black)
+ monitor.write(string.rep(" ", width - used))
  end
  local barW = math.max(1, width - used)
  local filled = math.floor((tick / scanInterval) * barW)
@@ -1289,50 +1386,50 @@ local function craftHandler(request, bridgeItem, bridge, craftAmount, itemLabel,
  local maxStackSize = ri.maxStackSize
  local stackSize
  if craftAmount ~= nil then
-  stackSize = craftAmount
+ stackSize = craftAmount
  else
-  stackSize = (craftMaxStack and maxStackSize) or request.count
+ stackSize = (craftMaxStack and maxStackSize) or request.count
  end
 
  if not stackSize or stackSize == 0 then
-  stackSize = 1
+ stackSize = 1
  end
  local label, idLog = itemLabel, itemIdForLog
  if not label or not idLog then
-  label, idLog = describeItemLabel(ri, bridgeItem, name)
+ label, idLog = describeItemLabel(ri, bridgeItem, name)
  end
  local fingerprintBridge = nil
  if bridgeItem and bridgeItem.fingerprint then
-  fingerprintBridge = bridgeItem.fingerprint
+ fingerprintBridge = bridgeItem.fingerprint
  elseif fingerprintRequest then
-  fingerprintBridge = fingerprintRequest
+ fingerprintBridge = fingerprintRequest
  end
  local comps = ri.components
  if type(comps) ~= "table" then
-  comps = {}
+ comps = {}
  end
  local filter = buildMeItemFilter(name, fingerprintBridge, stackSize, comps)
  if filter then
-  local okCr, cr = pcall(function()
-   return bridge.isCraftable(filter)
-  end)
-  if okCr and cr then
-   craftable = true
-   payload = filter
-  elseif not okCr and doLog then
-   logLine("[ae2Colony] isCraftable error: " .. tostring(cr))
-  end
+ local okCr, cr = pcall(function()
+ return bridge.isCraftable(filter)
+ end)
+ if okCr and cr then
+ craftable = true
+ payload = filter
+ elseif not okCr and doLog then
+ logLine("[ae2Colony] isCraftable error: " .. tostring(cr))
+ end
  end
  if not craftable and meRegistryName(name) then
  local f2 = buildMeItemFilter(name, nil, stackSize, comps)
  if f2 then
-  local okCr2, cr2 = pcall(function()
-   return bridge.isCraftable(f2)
-  end)
-  if okCr2 and cr2 then
-   craftable = true
-   payload = f2
-  end
+ local okCr2, cr2 = pcall(function()
+ return bridge.isCraftable(f2)
+ end)
+ if okCr2 and cr2 then
+ craftable = true
+ payload = f2
+ end
  end
  end
  if craftable then
@@ -1343,14 +1440,14 @@ local function craftHandler(request, bridgeItem, bridge, craftAmount, itemLabel,
  logAndDisplay(formatItemAction("[ERROR] Failed craft", stackSize, label, idLog, ""))
  end
  else
-  logAndDisplay(formatItemAction("[MISSING] No recipe", stackSize, label, idLog, ""))
-  notifyMissingPatternHook({
-   name = name,
-   count = stackSize,
-   fingerprint = fingerprintRequest,
-   target = (request and (request.target or request.name)) or "",
-   display_label = label,
-  })
+ logAndDisplay(formatItemAction("[MISSING] No recipe", stackSize, label, idLog, ""))
+ notifyMissingPatternHook({
+ name = name,
+ count = stackSize,
+ fingerprint = fingerprintRequest,
+ target = (request and (request.target or request.name)) or "",
+ display_label = label,
+ })
  end
  return object
 end
@@ -1359,13 +1456,13 @@ local function bridgeStockCountForNeed(bridge, entry)
  local comps = entry.components or {}
  local filter = buildMeItemFilter(entry.name, entry.fingerprint, 65536, comps)
  if not filter then
-  return 0
+ return 0
  end
  local ok, it = pcall(function()
-  return bridge.getItem(filter)
+ return bridge.getItem(filter)
  end)
  if ok and it and type(it.count) == "number" then
-  return it.count
+ return it.count
  end
  return 0
 end
@@ -1373,87 +1470,87 @@ end
 -- One-shot: export what is already in ME for NEEDS rows, then request autocraft for the remainder.
 local function manualConstructionPush(bridge, colony, monitor)
  if not showConstructionNeedsList then
-  logAndDisplay("[MANUAL] NEEDS list disabled (showConstructionNeedsList=false).")
-  return
+ logAndDisplay("[MANUAL] NEEDS list disabled (showConstructionNeedsList=false).")
+ return
  end
  local nowMs = os.epoch("utc")
  local fresh = fetchColonyUiSnapshot(colony, nowMs)
  colonyUiSnapshot = fresh
  monitorColonyPrefixLines = {}
  for _, ln in ipairs(fresh.lines) do
-  table.insert(monitorColonyPrefixLines, ln)
+ table.insert(monitorColonyPrefixLines, ln)
  end
  for _, ln in ipairs(fresh.needsLines or {}) do
-  table.insert(monitorColonyPrefixLines, ln)
+ table.insert(monitorColonyPrefixLines, ln)
  end
  local entries = fresh.needsEntries
  if not entries or #entries == 0 then
-  logAndDisplay("[MANUAL] No NEEDS rows (no work orders or resources list empty).")
-  if monitor then
-   refreshMonitorBody(monitor)
-  end
-  return
+ logAndDisplay("[MANUAL] No NEEDS rows (no work orders or resources list empty).")
+ if monitor then
+ refreshMonitorBody(monitor)
+ end
+ return
  end
  if not confirmConnection(bridge) then
-  logAndDisplay("[MANUAL] AE2 offline; cannot craft/export.")
-  return
+ logAndDisplay("[MANUAL] AE2 offline; cannot craft/export.")
+ return
  end
  logAndDisplay(string.format("[MANUAL] Footer push: %d material line(s)", #entries))
  for _, entry in ipairs(entries) do
-  if tostring(entry.status or "") == "NOT_NEEDED" then
-  else
-  local need = math.floor(tonumber(entry.needed) or 0)
-  if need < 1 then
-  else
-  local label = entry.displayName or prettifyItemId(entry.name)
-  local idLog = entry.name
-  local stock = bridgeStockCountForNeed(bridge, entry)
-  local fromStock = math.min(stock, need)
-  if fromStock > 0 then
-   queueExport(
-    entry.fingerprint,
-    fromStock,
-    entry.name,
-    "work-order",
-    nil,
-    label,
-    idLog,
-    entry.components
-   )
-  end
-  local remain = need - fromStock
-  if remain > 0 then
-   local comps = entry.components or {}
-   local fakeRi = {
-    name = entry.name,
-    fingerprint = entry.fingerprint,
-    maxStackSize = 64,
-    components = comps,
-   }
-   local fakeReq = { count = remain, target = "work-order", items = { fakeRi } }
-   craftHandler(fakeReq, nil, bridge, remain, label, idLog)
-  end
-  end
-  end
+ if tostring(entry.status or "") == "NOT_NEEDED" then
+ else
+ local need = math.floor(tonumber(entry.needed) or 0)
+ if need < 1 then
+ else
+ local label = entry.displayName or prettifyItemId(entry.name)
+ local idLog = entry.name
+ local stock = bridgeStockCountForNeed(bridge, entry)
+ local fromStock = math.min(stock, need)
+ if fromStock > 0 then
+ queueExport(
+ entry.fingerprint,
+ fromStock,
+ entry.name,
+ "work-order",
+ nil,
+ label,
+ idLog,
+ entry.components
+ )
+ end
+ local remain = need - fromStock
+ if remain > 0 then
+ local comps = entry.components or {}
+ local fakeRi = {
+ name = entry.name,
+ fingerprint = entry.fingerprint,
+ maxStackSize = 64,
+ components = comps,
+ }
+ local fakeReq = { count = remain, target = "work-order", items = { fakeRi } }
+ craftHandler(fakeReq, nil, bridge, remain, label, idLog)
+ end
+ end
+ end
  end
  processExportBuffer(bridge)
 end
 
 local function handleMonitorTouch(monitor, bridge, colony)
  while true do
-  local event, side, _, y = os.pullEvent("monitor_touch")
-  if side == peripheral.getName(monitor) then
-   local _, h = monitor.getSize()
-   if showConstructionPushFooter and h >= 5 and y == h then
-    manualConstructionPush(bridge, colony, monitor)
-   else
-    currentPage = currentPage + 1
-    if currentPage > totalPages then
-     currentPage = 1
-    end
-   end
-   refreshMonitorBody(monitor)
-  end
+ local event, side, _, y = os.pullEvent("monitor_touch")
+ if side == peripheral.getName(monitor) then
+ local _, h = monitor.getSize()
+ if showConstructionPushFooter and h >= 5 and y == h then
+ manualConstructionPush(bridge, colony, monitor)
+ else
+ currentPage = currentPage + 1
+ if currentPage > totalPages then
+ currentPage = 1
+ end
+ end
+ refreshMonitorBody(monitor)
+ end
  end
 end
 
@@ -1605,10 +1702,10 @@ local function main()
  nextUiMs = nowScan + (colonyUiInterval * 1000)
  end
  for _, ln in ipairs(colonyUiSnapshot.lines) do
-  table.insert(monitorColonyPrefixLines, ln)
+ table.insert(monitorColonyPrefixLines, ln)
  end
  for _, ln in ipairs(colonyUiSnapshot.needsLines or {}) do
-  table.insert(monitorColonyPrefixLines, ln)
+ table.insert(monitorColonyPrefixLines, ln)
  end
  mainHandler(bridge, colony)
  processExportBuffer(bridge)
@@ -1621,10 +1718,10 @@ local function main()
  nextUiMs = now + (colonyUiInterval * 1000)
  monitorColonyPrefixLines = {}
  for _, ln in ipairs(colonyUiSnapshot.lines) do
-  table.insert(monitorColonyPrefixLines, ln)
+ table.insert(monitorColonyPrefixLines, ln)
  end
  for _, ln in ipairs(colonyUiSnapshot.needsLines or {}) do
-  table.insert(monitorColonyPrefixLines, ln)
+ table.insert(monitorColonyPrefixLines, ln)
  end
  refreshMonitorBody(monitor)
  end
