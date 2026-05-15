@@ -23,6 +23,11 @@ ae2Colony
 
 (Optional) Save as `startup.lua` with `shell.run("ae2Colony")` for autostart.
 
+### v0.5.2 highlights
+
+- **NEEDS** also merges **`getBuilderResources`** at the builder hut position (closer to the MineColonies “Required resources” UI than `getRequests()` alone).
+- Clearer **INFO** when `getRequests()` is empty: warehouse requests are not the same as construction materials.
+
 ### v0.5.1 highlights
 
 - **`== NEEDS ==` window:** merged construction materials from active work orders (`getWorkOrderResources`).

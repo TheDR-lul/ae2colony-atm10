@@ -12,6 +12,7 @@ return {
   constructionNeedsMaxWorkOrders = 3,
   constructionNeedsMaxItems = 14,
   showConstructionPushFooter = true,
+  mergeBuilderHutResources = true,
   showBuildingsList = false,
   buildingsBreakerMinutes = 30,
   maxLinesPerGroup = 12,

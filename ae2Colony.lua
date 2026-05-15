@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.5.1-atm10"
+local scriptVersion = "0.5.2-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -93,6 +93,8 @@ local showConstructionNeedsList = true
 local constructionNeedsMaxWorkOrders = 3
 local constructionNeedsMaxItems = 14
 local showConstructionPushFooter = true
+-- Also merge colony.getBuilderResources(builderPos) into NEEDS (often closer to the in-game construction list).
+local mergeBuilderHutResources = true
 local monitorGroupOrder = {
  "COLONY",
  "NEEDS",
@@ -179,6 +181,9 @@ local function mergeUserConfig()
  end
  if tbl.showConstructionPushFooter ~= nil then
   showConstructionPushFooter = tbl.showConstructionPushFooter
+ end
+ if tbl.mergeBuilderHutResources ~= nil then
+  mergeBuilderHutResources = tbl.mergeBuilderHutResources
  end
  if type(tbl.missingPatternHook) == "table" then
   for mk, mv in pairs(tbl.missingPatternHook) do
@@ -393,12 +398,15 @@ local function fetchColonyUiSnapshot(colony, nowMs)
       return
      end
      local name = r.item or r.name
+     if (not name or #name == 0) and type(r.id) == "string" then
+      name = r.id
+     end
      if type(name) ~= "string" or #name == 0 then
       return
      end
      local fp = r.fingerprint
      local key = (fp and tostring(fp)) or name
-     local n = tonumber(r.needed) or tonumber(r.count) or 0
+     local n = tonumber(r.needed) or tonumber(r.count) or tonumber(r.amount) or tonumber(r.missing) or 0
      if n < 1 then
       n = 1
      end
@@ -436,6 +444,27 @@ local function fetchColonyUiSnapshot(colony, nowMs)
       if okRes and type(res) == "table" then
        for ri = 1, #res do
         mergeNeedRow(wrow.id, res[ri])
+       end
+      end
+     end
+    end
+
+    if mergeBuilderHutResources then
+     for wi = 1, woLimit do
+      local wrow = list[wi]
+      local bp = wrow and wrow.builder
+      if type(bp) == "table" and bp.x ~= nil and bp.z ~= nil then
+       local okBr, bred = pcall(function()
+        return colony.getBuilderResources({
+         x = bp.x,
+         y = bp.y or 0,
+         z = bp.z,
+        })
+       end)
+       if okBr and type(bred) == "table" then
+        for ri = 1, #bred do
+         mergeNeedRow(wrow.id, bred[ri])
+        end
        end
       end
      end
@@ -1215,6 +1244,7 @@ local function mainHandler(bridge, colony)
  local indexFingerprint = bridgeDataHandler(bridge)
  if not colonyRequests then
  logAndDisplay(string.format("[INFO] No colony requests detected!"))
+ logAndDisplay("[INFO] getRequests() is warehouse supply, not the build GUI list.")
  return
  end
  syncExportLedger(colonyRequests)
