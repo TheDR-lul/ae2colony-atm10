@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.5.17-atm10"
+local scriptVersion = "0.6.0-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -168,6 +168,30 @@ local FOOTER_ALERT_MODE_CHARS = 8
 -- [SCAN] needs room for craft + mode + scan + test (see footerAlertBarLayout).
 local FOOTER_MIN_MONITOR_W_FOR_SCAN_BUTTON = 16
 
+-- Monitor layout: "classic" (single column) or "scada" (split body; needs scada.enabled + wide monitor).
+local uiMode = "classic"
+-- Experimental SCADA metrics (citizen saturation, ME food whitelist, local heuristic trends). See docs/SCADA.md.
+local scada = {
+ enabled = false,
+ intervalSec = 15,
+ minMonitorWidth = 26,
+ leftBodyFraction = 0.58,
+ saturationWarnBelow = 8,
+ foodWhitelist = {
+ "minecraft:bread",
+ "minecraft:cooked_beef",
+ "minecraft:baked_potato",
+ "minecraft:carrot",
+ "minecraft:cooked_porkchop",
+ },
+ scanMeFoodFromWhitelist = true,
+ historyFile = "ae2colony_scada_history.jsonl",
+ historySampleSec = 60,
+ maxHistoryPoints = 48,
+ trendWindowPoints = 10,
+ warnTrendDropCycles = 3,
+}
+
 local function mergeUserConfig()
  if not fs.exists("ae2colony_config.lua") then
  return
@@ -303,6 +327,21 @@ local function mergeUserConfig()
  end
  if type(tbl.whitelistItemName) == "table" then
  whitelistItemName = tbl.whitelistItemName
+ end
+ if tbl.uiMode == "classic" or tbl.uiMode == "scada" then
+ uiMode = tbl.uiMode
+ end
+ if type(tbl.ui) == "table" and (tbl.ui.mode == "classic" or tbl.ui.mode == "scada") then
+ uiMode = tbl.ui.mode
+ end
+ if type(tbl.scada) == "table" then
+ for sk, sv in pairs(tbl.scada) do
+ if sk == "foodWhitelist" and type(sv) == "table" then
+ scada.foodWhitelist = sv
+ else
+ scada[sk] = sv
+ end
+ end
  end
  print("[ae2Colony] Merged ae2colony_config.lua")
 end
@@ -469,6 +508,9 @@ local colonyUiSnapshot = {
  underAttack = false,
  breakerActive = false,
  breakerJustTripped = false,
+ happiness = nil,
+ citizensCur = nil,
+ citizensMax = nil,
 }
 
 -- AP / CC may return resource lists as sparse arrays, mixed maps, or { resources = {...} }; #tbl is then wrong.
@@ -1032,6 +1074,9 @@ local function fetchColonyUiSnapshot(colony, nowMs)
  underAttack = underAttackFlag,
  breakerActive = (buildingsDisabledUntil or 0) > nowMs,
  breakerJustTripped = breakerJustTripped,
+ happiness = (okH and happy ~= nil) and tonumber(happy) or nil,
+ citizensCur = (okC and cur ~= nil) and tonumber(cur) or nil,
+ citizensMax = (okM and maxc ~= nil) and tonumber(maxc) or nil,
  }
 end
 
@@ -1056,6 +1101,185 @@ local whitelistItemName = {
 mergeUserConfig()
 loadAlertsMuted()
 loadAlertsMonitorOverride()
+
+-- [SCADA snapshot + heuristic history] -------------------------------------------------------------------------------
+local scadaSnapshot = {
+ errorCitizens = nil,
+ citizenCount = 0,
+ citizensWithSat = 0,
+ avgSat = nil,
+ minSat = nil,
+ lowSatCount = 0,
+ lowSamples = {},
+ meFood = {},
+ meFoodError = nil,
+ satSlopePerStep = nil,
+ trendWarn = false,
+ heuristicLine = nil,
+ lastMs = 0,
+}
+
+local scadaHistoryRing = {}
+local lastScadaHistoryAppendMs = 0
+local satTrendNegStreak = 0
+
+local function trimScadaHistoryRing()
+ local cap = math.max(4, tonumber(scada.maxHistoryPoints) or 48)
+ while #scadaHistoryRing > cap do
+ table.remove(scadaHistoryRing, 1)
+ end
+end
+
+local function appendScadaHistoryRow(row)
+ local path = scada.historyFile
+ if type(path) ~= "string" or #path < 1 then
+ return
+ end
+ local f = fs.open(path, "a")
+ if f then
+ f.writeLine(textutils.serialize(row))
+ f.close()
+ end
+ scadaHistoryRing[#scadaHistoryRing + 1] = row
+ trimScadaHistoryRing()
+end
+
+local function recomputeAvgSatSlopePerStep()
+ local w = math.min(math.max(2, tonumber(scada.trendWindowPoints) or 10), #scadaHistoryRing)
+ if w < 2 or #scadaHistoryRing < 2 then
+ return nil
+ end
+ local start = #scadaHistoryRing - w + 1
+ local sumx, sumy, sumxx, sumxy, n = 0, 0, 0, 0, 0
+ local x = 1
+ for i = start, #scadaHistoryRing do
+ local s = tonumber(scadaHistoryRing[i].avgSat)
+ if s then
+ sumx = sumx + x
+ sumy = sumy + s
+ sumxx = sumxx + x * x
+ sumxy = sumxy + x * s
+ n = n + 1
+ x = x + 1
+ end
+ end
+ if n < 2 then
+ return nil
+ end
+ local denom = n * sumxx - sumx * sumx
+ if denom == 0 then
+ return nil
+ end
+ return (n * sumxy - sumx * sumy) / denom
+end
+
+local function fetchScadaSnapshot(colony, bridge, nowMs)
+ local out = {
+ errorCitizens = nil,
+ citizenCount = 0,
+ citizensWithSat = 0,
+ avgSat = nil,
+ minSat = nil,
+ lowSatCount = 0,
+ lowSamples = {},
+ meFood = {},
+ meFoodError = nil,
+ satSlopePerStep = nil,
+ trendWarn = false,
+ heuristicLine = nil,
+ lastMs = nowMs,
+ }
+ local thr = tonumber(scada.saturationWarnBelow) or 8
+ local okC, citizens = pcall(function()
+ return colony.getCitizens()
+ end)
+ if not okC or type(citizens) ~= "table" then
+ out.errorCitizens = "getCitizens() failed"
+ else
+ local sum = 0
+ local nSat = 0
+ local minS = nil
+ local low = {}
+ local nCit = 0
+ for _, c in pairs(citizens) do
+ if type(c) == "table" then
+ nCit = nCit + 1
+ local sat = tonumber(c.saturation)
+ if sat == nil and c.saturation ~= nil then
+ sat = tonumber(tostring(c.saturation))
+ end
+ if sat ~= nil then
+ nSat = nSat + 1
+ sum = sum + sat
+ minS = minS and math.min(minS, sat) or sat
+ if sat < thr then
+ out.lowSatCount = out.lowSatCount + 1
+ low[#low + 1] = { name = tostring(c.name or "?"), sat = sat }
+ end
+ end
+ end
+ out.citizenCount = nCit
+ out.citizensWithSat = nSat
+ if nSat > 0 then
+ out.avgSat = sum / nSat
+ out.minSat = minS
+ table.sort(low, function(a, b)
+ return a.sat < b.sat
+ end)
+ for i = 1, math.min(3, #low) do
+ out.lowSamples[#out.lowSamples + 1] = low[i]
+ end
+ end
+ end
+ if scada.scanMeFoodFromWhitelist and bridge and type(bridge.getItem) == "function" then
+ local wl = scada.foodWhitelist
+ if type(wl) == "table" then
+ for _, id in ipairs(wl) do
+ if type(id) == "string" and #id > 0 then
+ local okG, it = pcall(function()
+ return bridge.getItem({ name = id, count = 1, components = {} })
+ end)
+ if okG and type(it) == "table" then
+ local cnt = tonumber(it.count) or 0
+ out.meFood[#out.meFood + 1] = { name = id, count = cnt }
+ elseif not okG then
+ out.meFoodError = "getItem failed"
+ break
+ end
+ end
+ end
+ end
+ elseif scada.scanMeFoodFromWhitelist then
+ out.meFoodError = "no getItem"
+ end
+ local sampleMs = math.max(15, tonumber(scada.historySampleSec) or 60) * 1000
+ if out.avgSat ~= nil and (nowMs - lastScadaHistoryAppendMs) >= sampleMs then
+ lastScadaHistoryAppendMs = nowMs
+ appendScadaHistoryRow({
+ t = nowMs,
+ avgSat = out.avgSat,
+ happiness = colonyUiSnapshot.happiness,
+ citizens = colonyUiSnapshot.citizensCur,
+ })
+ end
+ out.satSlopePerStep = recomputeAvgSatSlopePerStep()
+ local slope = out.satSlopePerStep
+ if slope and slope < -0.02 then
+ satTrendNegStreak = satTrendNegStreak + 1
+ else
+ satTrendNegStreak = 0
+ end
+ local needN = tonumber(scada.warnTrendDropCycles) or 3
+ out.trendWarn = satTrendNegStreak >= needN
+ if slope then
+ out.heuristicLine = string.format("est.sat/step:%.3f (heur.)", slope)
+ else
+ out.heuristicLine = "est.sat: n/a (heur.)"
+ end
+ return out
+end
+
+local nextScadaMs = 0
 
 local alertKindToConfig = {
  raid = "onRaid",
@@ -1300,20 +1524,17 @@ local function setupMonitor()
  return monitor
 end
 
-local function updateMonitorGrouped(monitor)
- if not monitor then return end
+local function setupMonitor()
+ local monitor = peripheral.find("monitor")
+ if not monitor then return nil end
+ monitor.setTextScale(0.5)
+ monitor.clear()
+ monitor.setCursorPos(1, 1)
+ return monitor
+end
 
- local width, height = monitor.getSize()
- local footerReserved = (height >= 5)
- and (showConstructionPushFooter or showAlertsMuteButton)
- and 1
- or 0
- local reserved = footerReserved
- local craftHudRows = (showMeCraftingHudLine and height >= 8) and 1 or 0
- reserved = reserved + craftHudRows
- local maxLines = height - 2 - reserved
+local function buildGroupedMonitorFlatLines()
  local flatLines = {}
-
  local colorsMap = {
  COLONY = colors.lightBlue,
  NEEDS = colors.pink,
@@ -1325,7 +1546,6 @@ local function updateMonitorGrouped(monitor)
  MANUAL = colors.cyan,
  INFO = colors.yellow,
  }
-
  local groups = {
  ["COLONY"] = {},
  ["NEEDS"] = {},
@@ -1337,7 +1557,6 @@ local function updateMonitorGrouped(monitor)
  ["MANUAL"] = {},
  ["INFO"] = {},
  }
-
  local combinedLines = {}
  for _, ln in ipairs(monitorColonyPrefixLines) do
  table.insert(combinedLines, ln)
@@ -1345,7 +1564,6 @@ local function updateMonitorGrouped(monitor)
  for _, ln in ipairs(monitorLines) do
  table.insert(combinedLines, ln)
  end
-
  for _, line in ipairs(combinedLines) do
  local placed = false
  for _, label in ipairs(monitorGroupOrder) do
@@ -1359,14 +1577,13 @@ local function updateMonitorGrouped(monitor)
  table.insert(groups["INFO"], line)
  end
  end
-
  for _, label in ipairs(monitorGroupOrder) do
  local entries = groups[label]
  if entries and #entries > 0 then
- table.insert(flatLines, {text = "== " .. label .. " ==", color = colors.white})
+ table.insert(flatLines, { text = "== " .. label .. " ==", color = colors.white })
  local cap = maxLinesPerGroup or 12
  for j = 1, math.min(#entries, cap) do
- table.insert(flatLines, {text = entries[j], color = colorsMap[label] or colors.white})
+ table.insert(flatLines, { text = entries[j], color = colorsMap[label] or colors.white })
  end
  if #entries > cap then
  table.insert(
@@ -1379,7 +1596,6 @@ local function updateMonitorGrouped(monitor)
  end
  end
  end
-
  local pin = pinnedDisplayLines or {}
  local pinFlat = {}
  local pinMax = math.min(#pin, math.max(0, tonumber(pinnedAlertsMaxLines) or 3))
@@ -1399,8 +1615,97 @@ local function updateMonitorGrouped(monitor)
  end
  flatLines = merged
  end
+ return flatLines
+end
 
- totalPages = math.ceil(#flatLines / maxLines)
+local function clipStr(s, w)
+ if type(s) ~= "string" then
+ return ""
+ end
+ if #s <= w then
+ return s
+ end
+ if w < 4 then
+ return ""
+ end
+ return s:sub(1, w - 2) .. ".."
+end
+
+local function buildScadaRightPanelLines(maxRows, rightW, snap)
+ local rows = {}
+ local function push(txt, col)
+ if #rows >= maxRows then
+ return
+ end
+ rows[#rows + 1] = { text = clipStr(txt, rightW), color = col or colors.lightGray }
+ end
+ if maxRows < 1 or rightW < 4 then
+ return rows
+ end
+ push("== SCADA ==", colors.white)
+ if snap.errorCitizens then
+ push("[WARN] " .. snap.errorCitizens, colors.orange)
+ end
+ push(
+ string.format(
+ "Cit:%d satN:%d",
+ tonumber(snap.citizenCount) or 0,
+ tonumber(snap.citizensWithSat) or 0
+ ),
+ colors.lightBlue
+ )
+ if snap.avgSat then
+ push(
+ string.format(
+ "avgSat:%.1f min:%s",
+ snap.avgSat,
+ snap.minSat ~= nil and string.format("%.1f", snap.minSat) or "?"
+ ),
+ colors.lime
+ )
+ else
+ push("avgSat: n/a", colors.gray)
+ end
+ if (snap.lowSatCount or 0) > 0 then
+ push(string.format("LOW sat: %d", snap.lowSatCount), colors.magenta)
+ for _, s in ipairs(snap.lowSamples or {}) do
+ push(string.format(" %s %.1f", tostring(s.name):sub(1, 10), s.sat), colors.magenta)
+ end
+ end
+ if snap.meFoodError then
+ push("ME: " .. snap.meFoodError, colors.orange)
+ end
+ for _, e in ipairs(snap.meFood or {}) do
+ local short = prettifyItemId(e.name)
+ push(string.format("%s:%d", short, tonumber(e.count) or 0), colors.yellow)
+ end
+ if snap.heuristicLine then
+ push(snap.heuristicLine, colors.gray)
+ end
+ if snap.trendWarn then
+ push("[WARN] sat trend down", colors.red)
+ end
+ while #rows < maxRows do
+ push("", colors.black)
+ end
+ return rows
+end
+
+local function updateMonitorGrouped(monitor)
+ if not monitor then return end
+
+ local width, height = monitor.getSize()
+ local footerReserved = (height >= 5)
+ and (showConstructionPushFooter or showAlertsMuteButton)
+ and 1
+ or 0
+ local reserved = footerReserved
+ local craftHudRows = (showMeCraftingHudLine and height >= 8) and 1 or 0
+ reserved = reserved + craftHudRows
+ local maxLines = height - 2 - reserved
+ local flatLines = buildGroupedMonitorFlatLines()
+
+ totalPages = math.max(1, math.ceil(math.max(1, #flatLines) / math.max(1, maxLines)))
  if currentPage > totalPages then currentPage = 1 end
  local startLine = (currentPage - 1) * maxLines + 1
  local endLine = math.min(startLine + maxLines - 1, #flatLines)
@@ -1411,12 +1716,64 @@ local function updateMonitorGrouped(monitor)
  monitor.write(string.rep(" ", width))
  end
 
+ local minW = tonumber(scada.minMonitorWidth) or 26
+ local useScada = scada.enabled and uiMode == "scada" and width >= minW and maxLines >= 3
+ local leftW = 0
+ local sepW = 1
+ local rightW = 0
+ if useScada then
+ leftW = math.floor(width * (tonumber(scada.leftBodyFraction) or 0.58))
+ leftW = math.max(8, math.min(leftW, width - 9))
+ rightW = width - leftW - sepW
+ if rightW < 8 then
+ useScada = false
+ end
+ end
+ if useScada then
+ local rightLines = buildScadaRightPanelLines(maxLines, rightW, scadaSnapshot)
  local y = bodyStartY
+ for r = 1, maxLines do
+ local i = startLine + r - 1
+ monitor.setCursorPos(1, y)
+ if i <= #flatLines then
+ monitor.setTextColor(flatLines[i].color)
+ local lt = clipStr(flatLines[i].text, leftW)
+ monitor.write(lt)
+ if #lt < leftW then
+ monitor.setTextColor(colors.black)
+ monitor.write(string.rep(" ", leftW - #lt))
+ end
+ else
+ monitor.setTextColor(colors.black)
+ monitor.write(string.rep(" ", leftW))
+ end
+ monitor.setCursorPos(leftW + 1, y)
+ monitor.setTextColor(colors.gray)
+ monitor.write("|")
+ local rr = rightLines[r]
+ if rr then
+ monitor.setCursorPos(leftW + sepW + 1, y)
+ monitor.setTextColor(rr.color)
+ local rt = clipStr(rr.text, rightW)
+ monitor.write(rt)
+ if #rt < rightW then
+ monitor.setTextColor(colors.black)
+ monitor.write(string.rep(" ", rightW - #rt))
+ end
+ end
+ y = y + 1
+ end
+ return
+ end
+
+ local y = bodyStartY
+ if #flatLines > 0 then
  for i = startLine, endLine do
  monitor.setCursorPos(1, y)
  monitor.setTextColor(flatLines[i].color)
  monitor.write(flatLines[i].text:sub(1, width))
  y = y + 1
+ end
  end
 end
 
@@ -2553,6 +2910,11 @@ else
  print("[ae2Colony] Optional file override (true/false): ae2colony_alerts_monitor_enabled.txt")
 end
 print("[ae2Colony] Autostart: keep startup.lua next to ae2Colony.lua (same wget folder). Monitors w>=16: last row [SCAN] lists speakers.")
+if scada.enabled and uiMode == "scada" then
+ print("[ae2Colony] SCADA layout on (experimental). Needs wide monitor; see docs/SCADA.md in repo.")
+elseif scada.enabled then
+ print("[ae2Colony] SCADA metrics on (set uiMode or ui.mode to scada + wide monitor for split view). docs/SCADA.md")
+end
 
 local function main()
  local tick = scanInterval
@@ -2560,6 +2922,11 @@ local function main()
  local prevUnderAttack = false
  local prevMeOnline = true
  while true do
+ local nowMsLoop = os.epoch("utc")
+ if scada.enabled and nowMsLoop >= nextScadaMs then
+ scadaSnapshot = fetchScadaSnapshot(colony, bridge, nowMsLoop)
+ nextScadaMs = nowMsLoop + math.max(5000, (tonumber(scada.intervalSec) or 15) * 1000)
+ end
  exportBuffer = {}
  processPendingPostCraftDrain(bridge)
  monitorLines = {}
@@ -2597,6 +2964,10 @@ local function main()
 
  while tick > 0 do
  local now = os.epoch("utc")
+ if scada.enabled and now >= nextScadaMs then
+ scadaSnapshot = fetchScadaSnapshot(colony, bridge, now)
+ nextScadaMs = now + math.max(5000, (tonumber(scada.intervalSec) or 15) * 1000)
+ end
  if now >= nextUiMs then
  colonyUiSnapshot = fetchColonyUiSnapshot(colony, now)
  nextUiMs = now + (colonyUiInterval * 1000)

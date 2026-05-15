@@ -27,6 +27,23 @@ return {
   showConstructionNeedsDiff = false,
   constructionNeedsDiffMaxLines = 4,
   pinnedAlertsMaxLines = 3,
+  -- Experimental: split monitor (needs scada.enabled + wide monitor). See docs/SCADA.md
+  -- uiMode = "classic",
+  -- ui = { mode = "scada" },
+  -- scada = {
+  --   enabled = true,
+  --   intervalSec = 15,
+  --   minMonitorWidth = 26,
+  --   leftBodyFraction = 0.58,
+  --   saturationWarnBelow = 8,
+  --   scanMeFoodFromWhitelist = true,
+  --   foodWhitelist = { "minecraft:bread", "minecraft:cooked_beef" },
+  --   historyFile = "ae2colony_scada_history.jsonl",
+  --   historySampleSec = 60,
+  --   maxHistoryPoints = 48,
+  --   trendWindowPoints = 10,
+  --   warnTrendDropCycles = 3,
+  -- },
   -- Speaker + redstone alerts (debounced). Off by default.
   alerts = {
     enabled = false,
