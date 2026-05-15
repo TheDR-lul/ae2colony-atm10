@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.4.5-atm10"
+local scriptVersion = "0.4.6-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -55,10 +55,10 @@ local exportSide = "top"
 -- Example: "minecraft:chest_0". When set, this overrides `exportSide`.
 local exportChestPeripheral = nil
 
--- The script does NOT scan the export chest or colonist inventories. It uses MineColonies getRequests()
--- remaining counts and AE2 storage (getItems). Avoiding "double export" relies on the colony updating
--- requests once logistics consider them satisfied (usually after delivery to the hut/warehouse, not
--- only when items sit in your bridge chest buffer).
+-- Tracks how many items we already exported for each colony request line (see exportLedgerFile).
+-- This reduces double-export while MineColonies still reports the full request count.
+local exportLedgerFile = "ae2colony_export_ledger.json"
+local exportLedger = {}
 local craftMaxStack = false -- Autocraft exact or a stack. ie 3 logs vs 64 logs.
 local scanInterval = 30 -- Probably shouldn't go much lower than 20s...
 local doLog = false -- Leave false unless you have issues. Kinda spammy!
@@ -78,6 +78,108 @@ local missingPatternHook = {
  logFile = "ae2colony_missing_patterns.jsonl", -- always written when enabled (in addition to HTTP when httpUrl set)
 }
 local missingHookLastPostMs = {}
+
+local function prettifyItemId(id)
+ if type(id) ~= "string" then
+  return "?"
+ end
+ local _, item = id:match("^([^:]+):(.+)$")
+ if not item then
+  return id
+ end
+ local parts = {}
+ for part in item:gmatch("[^_]+") do
+  if #part > 0 then
+   table.insert(parts, part:sub(1, 1):upper() .. part:sub(2):lower())
+  end
+ end
+ if #parts == 0 then
+  return id
+ end
+ return table.concat(parts, " ")
+end
+
+local function describeItemLabel(requestItem, bridgeItem, idOverride)
+ local id = idOverride or (requestItem and requestItem.name) or "?"
+ if bridgeItem and type(bridgeItem.displayName) == "string" and #bridgeItem.displayName > 0 then
+  return bridgeItem.displayName, id
+ end
+ if requestItem and type(requestItem.displayName) == "string" and #requestItem.displayName > 0 then
+  return requestItem.displayName, id
+ end
+ return prettifyItemId(id), id
+end
+
+local function formatItemAction(prefix, count, label, id, extra)
+ local base = string.format("%s x%d %s (%s)", prefix, count, label, id)
+ if extra and #extra > 0 then
+  return base .. " " .. extra
+ end
+ return base
+end
+
+local function makeLedgerKey(fingerprint, name, target)
+ return tostring(fingerprint or "") .. "|" .. tostring(name or "?") .. "@" .. tostring(target or "")
+end
+
+local function loadExportLedger()
+ if not exportLedgerFile or #exportLedgerFile == 0 then
+  return
+ end
+ if not fs.exists(exportLedgerFile) then
+  return
+ end
+ local f = fs.open(exportLedgerFile, "r")
+ if not f then
+  return
+ end
+ local txt = f.readAll()
+ f.close()
+ if not txt or #txt == 0 then
+  return
+ end
+ local ok, data = pcall(textutils.unserializeJSON, txt)
+ if ok and type(data) == "table" then
+  exportLedger = data
+ end
+end
+
+local function saveExportLedger()
+ if not exportLedgerFile or #exportLedgerFile == 0 then
+  return
+ end
+ local f = fs.open(exportLedgerFile, "w")
+ if not f then
+  return
+ end
+ f.write(textutils.serializeJSON(exportLedger))
+ f.close()
+end
+
+local function syncExportLedger(colonyRequests)
+ if not colonyRequests then
+  return
+ end
+ local present = {}
+ for _, request in ipairs(colonyRequests) do
+  if request.items and request.items[1] then
+   local it = request.items[1]
+   local t = request.target or request.name or ""
+   local k = makeLedgerKey(it.fingerprint, it.name, t)
+   present[k] = true
+   local raw = request.count or 0
+   local out = exportLedger[k] or 0
+   if raw < out then
+    exportLedger[k] = nil
+   end
+  end
+ end
+ for k, _ in pairs(exportLedger) do
+  if not present[k] then
+   exportLedger[k] = nil
+  end
+ end
+end
 
 -- [BLACKLIST & WHITELIST LOOKUPS] --------------------------------------------------------------------------------------------------------
 -- blacklistedTags: all items matching the given tags are skipped, they do not export.
@@ -279,6 +381,7 @@ local function notifyMissingPatternHook(ctx)
   count = ctx.count or 1,
   fingerprint = ctx.fingerprint or "",
   target = ctx.target or "",
+  display_label = ctx.display_label or "",
   ts = now,
  }
  local body = textutils.serializeJSON(payload)
@@ -323,16 +426,20 @@ end
 
 -- [UTILS] ------------------------------------------------------------------------------------------------------------
 local exportBuffer = {}
-local function queueExport(fingerprint, count, name, target)
+local function queueExport(fingerprint, count, name, target, ledgerKey, label, idForLog)
  table.insert(exportBuffer, {
  name = name,
  fingerprint = fingerprint,
  count = count,
- target = target
+ target = target,
+ ledgerKey = ledgerKey,
+ label = label,
+ idForLog = idForLog or name,
  })
 end
 
 local function processExportBuffer(bridge)
+ local ledgerDirty = false
  for _, item in ipairs(exportBuffer) do
  local payload = {
   fingerprint = item.fingerprint,
@@ -346,11 +453,27 @@ local function processExportBuffer(bridge)
   end
   return bridge.exportItem(payload, exportSide)
  end)
+ local label = item.label or prettifyItemId(item.idForLog or item.name or "?")
+ local id = item.idForLog or item.name or "?"
+ local tgt = "> " .. tostring(item.target or "")
  if not ok or not result then
-  logAndDisplay(string.format("[ERROR] x%d %s [%s] > %s", item.count, item.name, tostring(item.fingerprint), item.target))
+  logAndDisplay(formatItemAction("[ERROR]", item.count, label, id, tgt))
  else
-  logAndDisplay(string.format("[SENT] x%d %s [%s] > %s", item.count, item.name, tostring(item.fingerprint), item.target))
+  local moved = item.count
+  if type(result) == "number" then
+   moved = result
+  elseif result == true then
+   moved = item.count
+  end
+  if item.ledgerKey and moved > 0 then
+   exportLedger[item.ledgerKey] = (exportLedger[item.ledgerKey] or 0) + moved
+   ledgerDirty = true
+  end
+  logAndDisplay(formatItemAction("[SENT]", moved, label, id, tgt))
  end
+ end
+ if ledgerDirty then
+  saveExportLedger()
  end
 end
 
@@ -514,7 +637,7 @@ local function domumHandler(request)
  table.insert(flip, value)
  end
  end
- logAndDisplay(string.format("[MANUAL] %s - %s [%s]", requestDisplayName, requestName, requestFingerprint))
+ logAndDisplay(string.format("[MANUAL] %s - %s (%s)", requestDisplayName, prettifyItemId(requestName), requestName))
  for key, value in ipairs(flip) do
  logAndDisplay(string.format("[MANUAL] #%d %s", key, value))
  end
@@ -528,18 +651,29 @@ end
 
 -- Tries to craft by fingerprint first, if nil it tries by name. Fingerprint is the best match!
 -- https://docs.advanced-peripherals.de/latest/guides/storage_system_functions/#objects
-local function craftHandler(request, bridgeItem, bridge)
+local function craftHandler(request, bridgeItem, bridge, craftAmount, itemLabel, itemIdForLog)
  local craftable = nil
  local payload = {}
  local ok, object = nil, nil
- -- isCraftable() currently can't use fingerprints as an item filter in AP 0.7.51b
- local fingerprintBridge = nil --bridgeItem and bridgeItem.fingerprint
- local fingerprintRequest = request.items[1].fingerprint
- local name = request.items[1].name
- local maxStackSize = request.items[1].maxStackSize
- local stackSize = (craftMaxStack and maxStackSize) or request.count
+ local fingerprintBridge = nil
+ local ri = request.items[1]
+ local fingerprintRequest = ri.fingerprint
+ local name = ri.name
+ local maxStackSize = ri.maxStackSize
+ local stackSize
+ if craftAmount ~= nil then
+  stackSize = craftAmount
+ else
+  stackSize = (craftMaxStack and maxStackSize) or request.count
+ end
 
- if stackSize == 0 then stackSize = 1 end
+ if not stackSize or stackSize == 0 then
+  stackSize = 1
+ end
+ local label, idLog = itemLabel, itemIdForLog
+ if not label or not idLog then
+  label, idLog = describeItemLabel(ri, bridgeItem, name)
+ end
  if fingerprintBridge then
  craftable = bridge.isCraftable({fingerprint = fingerprintBridge, count = stackSize})
  payload = {fingerprint = fingerprintBridge, count = stackSize}
@@ -547,22 +681,21 @@ local function craftHandler(request, bridgeItem, bridge)
  craftable = bridge.isCraftable({name = name, components = {}, count = stackSize})
  payload = {name = name, count = stackSize, components = {}}
  end
- -- Sometimes craftable isn't true when I think it should be, so craftable items miss the first scan.
- -- QUESTION: I need to learn more about AE2 crafting object events, because this seems a bit buggy. Next scan usually works!
  if craftable then
  ok, object = pcall(function() return bridge.craftItem(payload) end)
  if ok then
- logAndDisplay(string.format("[CRAFT] x%d - %s [%s]", stackSize, name, fingerprintRequest))
+ logAndDisplay(formatItemAction("[CRAFT]", stackSize, label, idLog, ""))
  else
- logAndDisplay(string.format("[ERROR] Failed crafting: x%d - %s [%s]", stackSize, name, fingerprintBridge or fingerprintRequest or "Not Available"))
+ logAndDisplay(formatItemAction("[ERROR] Failed craft", stackSize, label, idLog, ""))
  end
  else
-  logAndDisplay(string.format("[MISSING] No recipe x%d - %s [%s]", stackSize, name, fingerprintBridge or fingerprintRequest or "Not Available"))
+  logAndDisplay(formatItemAction("[MISSING] No recipe", stackSize, label, idLog, ""))
   notifyMissingPatternHook({
    name = name,
    count = stackSize,
    fingerprint = fingerprintRequest,
    target = (request and (request.target or request.name)) or "",
+   display_label = label,
   })
  end
  return object
@@ -577,49 +710,63 @@ end
 -- Case 4. No items available to export or crafting pattern to make. Make a pattern or do it manually. Or have your colonists do it.
 local function mainHandler(bridge, colony)
  local colonyRequests = colonyRequestHandler(colony)
- local fallbackCache = {}
  local indexFingerprint = bridgeDataHandler(bridge)
  if not colonyRequests then
  logAndDisplay(string.format("[INFO] No colony requests detected!"))
  return
  end
+ syncExportLedger(colonyRequests)
  for _, request in ipairs(colonyRequests) do
- local requestCount = request.count or 0
  local requestItem = request.items[1]
+ if requestItem then
  local requestTarget = request.target or request.name or "Unknown Target"
+ local requestFingerprint = requestItem.fingerprint
+ local requestName = requestItem.name
+ local ledgerKey = makeLedgerKey(requestFingerprint, requestName, requestTarget)
+ local rawCount = request.count or 0
+ local alreadyOut = exportLedger[ledgerKey] or 0
+ if rawCount < alreadyOut then
+ exportLedger[ledgerKey] = nil
+ alreadyOut = 0
+ end
+ local requestCount = math.max(0, rawCount - alreadyOut)
+ local bridgeItem = indexFingerprint[requestFingerprint]
+ local debugInfo = requestName or requestFingerprint
+ local label, idLog = describeItemLabel(requestItem, bridgeItem, requestName)
 
  local isTagBlacklisted, whitelistException = tagHandler(requestItem)
  local gearName = gearNameHandler(request)
-
- if requestItem then
- local requestFingerprint = requestItem.fingerprint
- local requestName = requestItem.name
- local bridgeItem = indexFingerprint[requestFingerprint]
- local debugInfo = requestName or requestFingerprint
 
  -- [CASE 1] Skip tag c:foods by default. Eventually your colonists should farm and cook meals!
  if isTagBlacklisted then
  if doLogExtra then logLine(string.format("[CASE 1] Tag Blacklisted [%s]", debugInfo)) end
  if whitelistException then
+ if requestCount <= 0 then
+ if doLogExtra then logLine("[CASE 1] Skipped (export ledger already satisfied this line)") end
+ else
  local bridgeCount = (bridgeItem and bridgeItem.count) or 0
- --local countDelta = requestCount - bridgeCount
  if bridgeCount >= requestCount then
  if doLogExtra then logLine("[CASE 1] Whitelist Exception - Export Full") end
- queueExport(requestFingerprint, requestCount, requestName, requestTarget)
+ queueExport(requestFingerprint, requestCount, requestName, requestTarget, ledgerKey, label, idLog)
  else
  if doLogExtra then logLine("[CASE 1] Whitelist Exception - Craft") end
- local craftObject = craftHandler(request, bridgeItem, bridge)
+ local craftObject = craftHandler(request, bridgeItem, bridge, requestCount, label, idLog)
+ end
  end
  else
- logAndDisplay(string.format("[INFO] Tag blacklist & item not whitelist. Skipping x%d %s", requestCount, requestItem.name))
+ logAndDisplay(string.format("[INFO] Tag blacklist & item not whitelist. Skipping x%d %s (%s)", rawCount, label, idLog))
  end
  -- [CASE 2] Matched keyword for tool or armour, try to export the max tiered material. Only non-enchanted.
  elseif gearName then
+ if requestCount <= 0 then
+ if doLogExtra then logLine(string.format("[CASE 2] Skipped (export ledger) [%s]", gearName)) end
+ else
  if doLogExtra then logLine(string.format("[CASE 2] Gear Lookup [%s]", gearName)) end
- local gearStock = bridge.getItem({name = gearName, count = requestCount, components = {}})
+ local gearStock = bridge.getItem({ name = gearName, count = requestCount, components = {} })
+ local gLabel, gId = describeItemLabel({ name = gearName }, gearStock, gearName)
  if gearStock and gearStock.count > 0 then
- if doLogExtra then logLine("[CASE 2] Gear In Stock: %s", gearName) end
- queueExport(nil, requestCount, gearName, requestTarget)
+ if doLogExtra then logLine(string.format("[CASE 2] Gear In Stock: %s", gearName)) end
+ queueExport(nil, requestCount, gearName, requestTarget, ledgerKey, gLabel, gId)
  else
  local simpleRequest = {
  count = requestCount,
@@ -628,34 +775,45 @@ local function mainHandler(bridge, colony)
  {
  maxStackSize = requestItem.maxStackSize,
  name = gearName,
- components = {}
+ components = {},
+ },
+ },
  }
- }
- }
- local craftObject = craftHandler(simpleRequest, nil, bridge)
+ local craftObject = craftHandler(simpleRequest, nil, bridge, requestCount, gLabel, gId)
+ end
  end
  -- [CASE 3] Export if items are available, or export partial and craft. Crafted items get exported next scan.
  elseif bridgeItem then
+ if requestCount <= 0 then
+ if doLogExtra then logLine(string.format("[CASE 3] Skipped (export ledger) [%s]", debugInfo)) end
+ else
  if doLogExtra then logLine(string.format("[CASE 3] Bridge Item [%s]", debugInfo)) end
  local bridgeCount = bridgeItem.count or 0
  local countDelta = bridgeCount - requestCount
  if countDelta > 0 then
  if doLogExtra then logLine("[CASE 3] Bridge Item - Export Full") end
- queueExport(requestFingerprint, requestCount, requestName, requestTarget)
+ queueExport(requestFingerprint, requestCount, requestName, requestTarget, ledgerKey, label, idLog)
  elseif bridgeCount > 0 then
  if doLogExtra then logLine(string.format("[CASE 3] Bridge Item - Export & Craft [%s]", debugInfo)) end
- queueExport(requestFingerprint, bridgeCount, requestName, requestTarget)
- local craftObject = craftHandler(request, bridgeItem, bridge)
+ queueExport(requestFingerprint, bridgeCount, requestName, requestTarget, ledgerKey, label, idLog)
+ local remain = requestCount - bridgeCount
+ if remain > 0 then
+ local craftObject = craftHandler(request, bridgeItem, bridge, remain, label, idLog)
+ end
  else
  if doLogExtra then logLine("[CASE 3] Bridge Item - Craft") end
- local craftObject = craftHandler(request, bridgeItem, bridge)
+ local craftObject = craftHandler(request, bridgeItem, bridge, requestCount, label, idLog)
+ end
  end
  -- [CASE 4] These items are not in stock, and/or don't have a recipe.
- -- Consider using colonists to craft things like Domum Ornamentum blocks.
+ else
+ if requestCount <= 0 then
+ if doLogExtra then logLine(string.format("[CASE 4] Skipped (export ledger) [%s]", debugInfo)) end
  else
  if doLogExtra then logLine(string.format("[CASE 4] Bridge Item - No Craft, Only Manual[%s]", debugInfo)) end
  local domum = domumHandler(request)
- local craftObject = craftHandler(request, bridgeItem, bridge)
+ local craftObject = craftHandler(request, bridgeItem, bridge, requestCount, label, idLog)
+ end
  end
  end
  end
@@ -663,6 +821,10 @@ end
 
 -- [MAIN LOOP] --------------------------------------------------------------------------------------------------------
 cleanupOldLogs()
+loadExportLedger()
+if exportLedgerFile and #exportLedgerFile > 0 then
+ print(string.format("[ae2Colony] Export ledger file: %s", exportLedgerFile))
+end
 local bridge, colony, monitor = setupPeripherals()
 local title = string.format("[INFO] %s v%s initialized", scriptName, scriptVersion)
 print(title)

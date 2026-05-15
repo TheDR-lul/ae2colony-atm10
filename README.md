@@ -4,7 +4,8 @@ Public fork of [toastonrye/ae2Colony](https://github.com/toastonrye/ae2Colony) f
 
 Upstream is MIT-licensed; see [LICENSE](LICENSE).
 
-**Russian “press the button” setup (chest on ME bridge, colony build):** [docs/SIMPLE-RU.md](docs/SIMPLE-RU.md)
+**Russian “press the button” setup (chest on ME bridge, colony build):** [docs/SIMPLE-RU.md](docs/SIMPLE-RU.md)  
+**v0.4.6:** export ledger (no double-pull from ME while colony count lags), human-readable names on monitor, partial-export craft uses remainder only.
 
 ## Install (in-game computer)
 
