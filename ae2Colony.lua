@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.5.3-atm10"
+local scriptVersion = "0.5.4-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -925,6 +925,47 @@ local function confirmConnection(bridge)
  return false
 end
 
+-- Newer me_bridge builds reject filters with only fingerprint — require a registry `name` ("mod:id") when possible.
+local function meRegistryName(name)
+ if type(name) ~= "string" or #name == 0 then
+  return nil
+ end
+ if not name:find(":") then
+  return nil
+ end
+ return name
+end
+
+local function normalizeMeFingerprint(fp)
+ if type(fp) == "string" and #fp > 0 then
+  return fp
+ end
+ if type(fp) == "table" and type(fp.hash) == "string" and #fp.hash > 0 then
+  return fp.hash
+ end
+ return nil
+end
+
+local function buildMeItemFilter(name, fingerprint, count, components)
+ local nm = meRegistryName(name)
+ local fp = normalizeMeFingerprint(fingerprint)
+ local comps = type(components) == "table" and components or {}
+ local c = tonumber(count) or 1
+ if c < 1 then
+  c = 1
+ end
+ if nm and fp then
+  return { name = nm, fingerprint = fp, count = c, components = comps }
+ end
+ if nm then
+  return { name = nm, count = c, components = comps }
+ end
+ if fp then
+  return { fingerprint = fp, count = c, components = comps }
+ end
+ return nil
+end
+
 -- [UTILS] ------------------------------------------------------------------------------------------------------------
 local exportBuffer = {}
 local function queueExport(fingerprint, count, name, target, ledgerKey, label, idForLog, components)
@@ -943,17 +984,20 @@ end
 local function processExportBuffer(bridge)
  local ledgerDirty = false
  for _, item in ipairs(exportBuffer) do
- local payload = {
-  fingerprint = item.fingerprint,
-  name = item.name,
-  count = item.count,
-  components = item.components or {},
- }
+ local filter = buildMeItemFilter(item.name, item.fingerprint, item.count, item.components)
+ if not filter then
+  logAndDisplay(
+   string.format(
+    "[ERROR] Export skipped (no valid item id): %s",
+    tostring(item.idForLog or item.name or "?")
+   )
+  )
+ else
  local ok, result = pcall(function()
   if exportChestPeripheral and #exportChestPeripheral > 0 then
-   return bridge.exportItemToPeripheral(payload, exportChestPeripheral)
+   return bridge.exportItemToPeripheral(filter, exportChestPeripheral)
   end
-  return bridge.exportItem(payload, exportSide)
+  return bridge.exportItem(filter, exportSide)
  end)
  local label = item.label or prettifyItemId(item.idForLog or item.name or "?")
  local id = item.idForLog or item.name or "?"
@@ -972,6 +1016,7 @@ local function processExportBuffer(bridge)
    ledgerDirty = true
   end
   logAndDisplay(formatItemAction("[SENT]", moved, label, id, tgt))
+ end
  end
  end
  if ledgerDirty then
@@ -1155,7 +1200,7 @@ end
 -- Tries to craft by fingerprint first, if nil it tries by name. Fingerprint is the best match!
 -- https://docs.advanced-peripherals.de/latest/guides/storage_system_functions/#objects
 local function craftHandler(request, bridgeItem, bridge, craftAmount, itemLabel, itemIdForLog)
- local craftable = nil
+ local craftable = false
  local payload = {}
  local ok, object = nil, nil
  local ri = request.items[1]
@@ -1186,12 +1231,29 @@ local function craftHandler(request, bridgeItem, bridge, craftAmount, itemLabel,
  if type(comps) ~= "table" then
   comps = {}
  end
- if fingerprintBridge then
- craftable = bridge.isCraftable({fingerprint = fingerprintBridge, count = stackSize, components = comps})
- payload = {fingerprint = fingerprintBridge, count = stackSize, components = comps}
- elseif name then
- craftable = bridge.isCraftable({name = name, components = comps, count = stackSize})
- payload = {name = name, count = stackSize, components = comps}
+ local filter = buildMeItemFilter(name, fingerprintBridge, stackSize, comps)
+ if filter then
+  local okCr, cr = pcall(function()
+   return bridge.isCraftable(filter)
+  end)
+  if okCr and cr then
+   craftable = true
+   payload = filter
+  elseif not okCr and doLog then
+   logLine("[ae2Colony] isCraftable error: " .. tostring(cr))
+  end
+ end
+ if not craftable and meRegistryName(name) then
+ local f2 = buildMeItemFilter(name, nil, stackSize, comps)
+ if f2 then
+  local okCr2, cr2 = pcall(function()
+   return bridge.isCraftable(f2)
+  end)
+  if okCr2 and cr2 then
+   craftable = true
+   payload = f2
+  end
+ end
  end
  if craftable then
  ok, object = pcall(function() return bridge.craftItem(payload) end)
@@ -1215,16 +1277,12 @@ end
 
 local function bridgeStockCountForNeed(bridge, entry)
  local comps = entry.components or {}
+ local filter = buildMeItemFilter(entry.name, entry.fingerprint, 65536, comps)
+ if not filter then
+  return 0
+ end
  local ok, it = pcall(function()
-  if entry.fingerprint then
-   return bridge.getItem({
-    fingerprint = entry.fingerprint,
-    name = entry.name,
-    count = 65536,
-    components = comps,
-   })
-  end
-  return bridge.getItem({ name = entry.name, count = 65536, components = comps })
+  return bridge.getItem(filter)
  end)
  if ok and it and type(it.count) == "number" then
   return it.count

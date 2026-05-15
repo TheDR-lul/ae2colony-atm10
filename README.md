@@ -23,6 +23,10 @@ ae2Colony
 
 (Optional) Save as `startup.lua` with `shell.run("ae2Colony")` for autostart.
 
+### v0.5.4 highlights
+
+- **me_bridge filters:** newer Advanced Peripherals reject `getItem` / `isCraftable` / `exportItem` filters that only have `fingerprint` without a registry **`name`** (`mod:id`). The script now builds filters via `buildMeItemFilter` and wraps `isCraftable` in `pcall` so one bad row does not crash the computer.
+
 ### v0.5.3 highlights
 
 - **NEEDS parsing:** tolerate sparse / non-array `getWorkOrderResources` / `getBuilderResources` tables and nested `item` objects (fixes empty NEEDS while “Top need” still showed).
