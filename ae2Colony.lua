@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.5.7-atm10"
+local scriptVersion = "0.5.8-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -388,31 +388,43 @@ local function quantityFromNeedRow(r)
  end
  return nil
  end
- -- MineColonies BuildingBuilderResource: getAmount() -> total for structure, getAvailable() -> in builder+chest
- local total = num(r.amount) or num(r.total) or num(r.totalNeeded) or num(r.total_needed) or num(r.required) or num(r.targetCount)
- local avail =
- num(r.amountAvailable)
- or num(r.available)
- or num(r.availableAmount)
- or num(r.amount_available)
- or num(r.delivered)
- or num(r.stored)
+ -- Advanced Peripherals MineColonies.builderResourcesToObject:
+ -- NeoForge/1.21+: "needs" = BuildingBuilderResource.getAmount() (total for the build line).
+ -- Forge/1.20.x: same value was exposed as "needed". Only use numeric "available" (int count), not boolean.
+ local total =
+ num(r.needs)
+ or num(r.needed)
+ or num(r.amount)
+ or num(r.total)
+ or num(r.totalNeeded)
+ or num(r.total_needed)
+ or num(r.required)
+ or num(r.targetCount)
+ local avail = num(r.amountAvailable) or num(r.availableAmount) or num(r.amount_available) or num(r.delivered) or num(r.stored)
+ if type(r.available) == "number" then
+ avail = avail or r.available
+ end
+ local inflight = num(r.delivering) or 0
  local n = nil
- if total and avail ~= nil and total > avail then
- n = total - avail
+ if total and avail ~= nil then
+ n = total - avail - inflight
+ if n < 1 then
+ return 0
+ end
+ return math.floor(n + 0.5)
  end
  if not n or n < 1 then
- local need = r.needed
+ local need = r.needs or r.needed
  if type(need) == "number" then
  n = need
  elseif type(need) == "string" then
  n = tonumber(need)
  elseif type(need) == "table" then
- n = tonumber(need.count or need.amount or need.needed)
+ n = tonumber(need.count or need.amount or need.needed or need.needs)
  end
  end
  if not n or n < 1 then
- n = num(r.count) or num(r.amount) or num(r.missing) or num(r.remaining) or num(r.shortage) or num(r.deficit)
+ n = num(r.needs) or num(r.count) or num(r.amount) or num(r.missing) or num(r.remaining) or num(r.shortage) or num(r.deficit)
  end
  if not n or n < 1 then
  n = 1
@@ -433,14 +445,19 @@ local function detailSuffixFromNeedRow(r)
  end
  return nil
  end
- local total = num(r.amount) or num(r.total) or num(r.totalNeeded) or num(r.total_needed) or num(r.required) or num(r.targetCount)
- local avail =
- num(r.amountAvailable)
- or num(r.available)
- or num(r.availableAmount)
- or num(r.amount_available)
- or num(r.delivered)
- or num(r.stored)
+ local total =
+ num(r.needs)
+ or num(r.needed)
+ or num(r.amount)
+ or num(r.total)
+ or num(r.totalNeeded)
+ or num(r.total_needed)
+ or num(r.required)
+ or num(r.targetCount)
+ local avail = num(r.amountAvailable) or num(r.availableAmount) or num(r.amount_available) or num(r.delivered) or num(r.stored)
+ if type(r.available) == "number" then
+ avail = avail or r.available
+ end
  if total and avail then
  return string.format(" (%d/%d)", avail, total)
  end
