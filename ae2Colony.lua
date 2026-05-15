@@ -1,5 +1,5 @@
 local scriptName = "AE2 Colony"
-local scriptVersion = "0.5.12-atm10"
+local scriptVersion = "0.5.13-atm10"
 -- ATM10+: disable strict gate so newer Advanced Peripherals (e.g. 0.7.59b+) can run.
 local strictAdvancedPeripheralsVersion = false
 local apVersionsTested = {
@@ -1099,29 +1099,6 @@ triggerAlert = function(kind)
  pulseRedstoneAlert()
 end
 
-local function rebuildPinnedLines(bridge, snap)
- pinnedDisplayLines = {}
- if not snap then
- return
- end
- local cap = math.max(1, tonumber(pinnedAlertsMaxLines) or 3)
- local function add(msg, col)
- if #pinnedDisplayLines >= cap then
- return
- end
- pinnedDisplayLines[#pinnedDisplayLines + 1] = { text = msg, color = col }
- end
- if bridge and not confirmConnection(bridge) then
- add("[ALERT] ME bridge OFFLINE", colors.red)
- end
- if snap.underAttack then
- add("[ALERT] Colony UNDER ATTACK", colors.red)
- end
- if snap.breakerActive then
- add("[ALERT] getBuildings API disabled (breaker)", colors.orange)
- end
-end
-
 -- [TOOLS & ARMOUR LOOKUPS]----------------------------------------------------------------------------------------------------
 -- QUESTION: It maybe better to just have colonists make tools and armour?
 -- gearNameHandler() replaces '$' with gold/diamond etc.
@@ -1423,6 +1400,29 @@ local function confirmConnection(bridge)
  return true
  end
  return false
+end
+
+local function rebuildPinnedLines(bridge, snap)
+ pinnedDisplayLines = {}
+ if not snap then
+ return
+ end
+ local cap = math.max(1, tonumber(pinnedAlertsMaxLines) or 3)
+ local function add(msg, col)
+ if #pinnedDisplayLines >= cap then
+ return
+ end
+ pinnedDisplayLines[#pinnedDisplayLines + 1] = { text = msg, color = col }
+ end
+ if bridge and not confirmConnection(bridge) then
+ add("[ALERT] ME bridge OFFLINE", colors.red)
+ end
+ if snap.underAttack then
+ add("[ALERT] Colony UNDER ATTACK", colors.red)
+ end
+ if snap.breakerActive then
+ add("[ALERT] getBuildings API disabled (breaker)", colors.orange)
+ end
 end
 
 -- Newer me_bridge builds reject filters with only fingerprint — require a registry `name` ("mod:id") when possible.
